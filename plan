@@ -1,0 +1,103 @@
+# Phase 1: Memory layout
+- must use a struct of arrays instead of an array of structs.
+  - meaning the cpu only works on certain entries it needs rather than every element in the array
+  - keeps L1 cache minimal
+
+- SoA rayPacket
+  - a packet of 8 arrays so blocks sent to L1 cache are full of relevant entries
+  - struct RayPacket {
+    // 8 rays' X-origins perfectly packed together (32 bytes)
+    float origin_x[8]; 
+    float origin_y[8];
+    float origin_z[8];
+
+    float dir_x[8];
+    float dir_y[8];
+    float dir_z[8];
+
+    // The spectral payload for 8 rays. 
+    // We can structure this as 8 bands, where each band holds the power for all 8 rays.
+    float spectrum_band_0[8]; // 400nm power for rays 0-7
+    float spectrum_band_1[8]; // 450nm power for rays 0-7
+    // ... up to band_7
+  };
+
+- Material packet
+  - materials can fit entirely within 64 bytes, so they stay as just structs
+  - struct Material {
+    float reflectance[8]; // 8 floats * 4 bytes = 32 bytes
+    float emission[8];    // 8 floats * 4 bytes = 32 bytes
+  }; // Total size: Exactly 64 bytes.
+
+- BVH Bounding Volume Heirarchy
+ - only calculate ray intersections if the ray first hits a bounding box.
+ - the scene is a 1D array of BVHNode structs
+ - use uint32-t indices to point to the next box in the array instead of pointers.
+ - one BVH is 32bytes, so 2 BVH nodes get pulled into the L1 cache for free.
+ - struct alignas(32) BVHNode {
+    float min_x, min_y, min_z; // Bottom corner (12 bytes)
+    uint32_t left_first;       // Index of left child, or index of first triangle (4 bytes)
+    
+    float max_x, max_y, max_z; // Top corner (12 bytes)
+    uint32_t triangle_count;   // If > 0, this is a leaf node. (4 bytes)
+  }; // Total size: Exactly 32 bytes.
+
+## Engine state
+- the raypacket, material, and bvhnode structs will be instantiated inside a single enginestate struct at startup.
+- once the scene is initiated, new and malloc will never run again as it will destroy performance.
+
+
+# Phase 2: SIMD Math Core: tellign the cpu which registers to use.
+- use Intel AVX2 Intrinsics this makes phase 1 deterministic.
+
+## 32-byte alignment
+- c++ must have all floats and stuff aligning perfectly within 32 byte blocks to avoid seg fgaults with the 256 bit avx register.
+
+## datatype
+- use __m256 in c++ instead of floats, this is a representation of a cpu register.
+
+## execution
+- replace math loops with hardware logic.
+  - load 8 rays specteal floats into the register a
+  - load the materials 8 reflectance floats into register b
+  - command the cpu to multiply register a by register b simultaneously
+  - store the result back into the rays memory.
+
+
+# Phase 3: Branch Misprediction
+- when the program hits if(ray_hit_box), it has to guess if it hits or not, if its wrong, the cpu has to flush the whole assembly line and start over.
+- I must eliminate if statements ideally or at least prevent millions of if statements from running for ray intersections.
+
+## Mask generation
+- when the 8 rays test against a bvh, use the SIMD compare rahter than an if
+  - if ray0 hits, its 32bits are all 1
+  - if ray1 misses, its 32bits are all 0
+
+## Hardware blend (eg closest hit dist)
+- calculate new distances for all 8 rays (even the ones that missed)
+- create a mask of which rays actually hit the box AND are closer
+- if mask is 1 take new_distances, if mask is 0, keep old closest_distances
+
+## Resolving Divergence
+- if half a packet hits and half hits something else now we have to do math on 2 different materials for the one packet
+- to fix, at the end of each step, sort the whole array of rays based on material Id hit.
+
+
+# Phase 4: HDR Accumulation buffer.
+- once a packet finishes its life, it returns to the camera, the camera doesnt render an image it just accumulates a massive preallocated 2d array buffer of floats.
+- eg 1920 x 1080 x 8 floats.
+
+## Virtual sensor
+- instead of pixels, i will make red green and blue cones
+  - red = 600-700nm
+  - green = 500-600nm
+  - blue = 400-500nm
+- cones can be dynamically adjusted, for example you could shift the red cone to be able to see infrared light
+- you could do a 520nm bandpass zeroing out everything but a sharp spike at 520nm
+- Could be done with a SIMD dot product between accumulator and 3 cone arrays.
+
+## Decoupled display thread
+- DO NOT tie the physics into framerate.
+- Thread 1 runs the physics engine, runnign as fast as the cpu allows never stopping.
+- Thread 2 runs locked at 60fps, it reads the accumulator does the cone dot product, quick clamp down to 0-255, and pushes pixels to the screen.
+- No you can use the ui complerely unrestricted by how slow or fast the physics is running.
