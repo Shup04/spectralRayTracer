@@ -45,7 +45,10 @@ int main() {
     EngineState engine;
     
     // 1. LOAD AND BUILD (These handle their own mallocs)
-    if (!load_binary_stl("monkey head.stl", engine)) return -1;
+    if (!load_binary_stl("atlas2.stl", engine)) return -1;
+    rotate_model_x(engine, -90.0f);
+
+    rotate_model_y(engine, 180.0f);
     build_stub_bvh(engine);
 
     // 2. MANUALLY ALLOCATE ONLY THE MATERIALS
@@ -74,7 +77,7 @@ int main() {
             // We set origin_z to 5.0f to move the camera BACK so we can see the model at the origin.
             packet.origin_x[ray_idx] = 0.0f;
             packet.origin_y[ray_idx] = 0.0f;
-            packet.origin_z[ray_idx] = 5.0f; 
+            packet.origin_z[ray_idx] = 150.0f; 
 
             packet.dir_x[ray_idx] = ndc_x / len;
             packet.dir_y[ray_idx] = ndc_y / len;

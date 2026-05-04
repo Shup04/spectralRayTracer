@@ -2,8 +2,105 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <cmath>
+
 #include <immintrin.h>
 #include "core_types.h"
+
+inline void translate_model(EngineState& engine, float tx, float ty, float tz) {
+    for (uint32_t i = 0; i < engine.total_triangles; ++i) {
+        Triangle& tri = engine.triangles[i];
+        
+        // Move the base vertex in 3D space
+        tri.v0_x += tx;
+        tri.v0_y += ty;
+        tri.v0_z += tz;
+
+        // Note: Edges (e1, e2) and Normals do NOT change during translation
+        // because they represent the shape's orientation, not its position.
+    }
+}
+
+inline void rotate_model_x(EngineState& engine, float angle_degrees) {
+    float rad = angle_degrees * (3.14159265f / 180.0f);
+    float cos_a = std::cos(rad);
+    float sin_a = std::sin(rad);
+
+    for (uint32_t i = 0; i < engine.total_triangles; ++i) {
+        Triangle& tri = engine.triangles[i];
+
+        // Helper lambda to rotate Y and Z around the X-axis
+        auto rot = [&](float& y, float& z) {
+            float old_y = y;
+            y = old_y * cos_a - z * sin_a;
+            z = old_y * sin_a + z * cos_a;
+        };
+
+        // 1. Rotate the base vertex
+        rot(tri.v0_y, tri.v0_z);
+
+        // 2. Rotate the edges
+        rot(tri.e1_y, tri.e1_z);
+        rot(tri.e2_y, tri.e2_z);
+
+        // 3. Rotate the pre-calculated normal
+        rot(tri.norm_y, tri.norm_z);
+    }
+}
+
+inline void rotate_model_y(EngineState& engine, float angle_degrees) {
+    float rad = angle_degrees * (3.14159265f / 180.0f);
+    float cos_a = std::cos(rad);
+    float sin_a = std::sin(rad);
+
+    for (uint32_t i = 0; i < engine.total_triangles; ++i) {
+        Triangle& tri = engine.triangles[i];
+
+        // Helper lambda to rotate X and Z around the Y-axis
+        auto rot = [&](float& x, float& z) {
+            float old_x = x;
+            x = old_x * cos_a + z * sin_a;
+            z = -old_x * sin_a + z * cos_a;
+        };
+
+        // 1. Rotate the base vertex
+        rot(tri.v0_x, tri.v0_z);
+
+        // 2. Rotate the edges
+        rot(tri.e1_x, tri.e1_z);
+        rot(tri.e2_x, tri.e2_z);
+
+        // 3. Rotate the pre-calculated normal
+        rot(tri.norm_x, tri.norm_z);
+    }
+}
+
+inline void rotate_model_z(EngineState& engine, float angle_degrees) {
+    float rad = angle_degrees * (3.14159265f / 180.0f);
+    float cos_a = std::cos(rad);
+    float sin_a = std::sin(rad);
+
+    for (uint32_t i = 0; i < engine.total_triangles; ++i) {
+        Triangle& tri = engine.triangles[i];
+
+        // Helper lambda to rotate X and Y around the Z-axis
+        auto rot = [&](float& x, float& y) {
+            float old_x = x;
+            x = old_x * cos_a - y * sin_a;
+            y = old_x * sin_a + y * cos_a;
+        };
+
+        // 1. Rotate the base vertex
+        rot(tri.v0_x, tri.v0_y);
+
+        // 2. Rotate the edges
+        rot(tri.e1_x, tri.e1_y);
+        rot(tri.e2_x, tri.e2_y);
+
+        // 3. Rotate the pre-calculated normal
+        rot(tri.norm_x, tri.norm_y);
+    }
+}
 
 inline void build_stub_bvh(EngineState& engine) {
     // We only have one node: the root
