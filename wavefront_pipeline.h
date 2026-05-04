@@ -175,3 +175,45 @@ inline void intersect_triangle_packet(RayPacket& packet, const Triangle& tri, __
   simd_store_int(packet.hit_material_id, blended_mat);
 }
 
+// The bvh stack holds all bvh nodes to check, 
+// when a bvh is hit by at least 1 ray in the packet, its 2 children are pushed to the stack.
+inline void traverse_bvh(RayPacket& packet, const EngineState& engine) {
+    // BVH index stack (64 can handle millions of tris)
+    uint32_t stack[64];
+    uint32_t stack_ptr = 0;
+
+    // push root node to the stack
+    stack[stack_ptr++] = 0;
+
+    // while the stack has elements
+    while (stack_ptr > 0) {
+        // Pop the top node index off the stack
+        uint32_t node_idx = stack[--stack_ptr];
+        const BVHNode& node = engine.bvh_nodes[node_idx];
+
+        // get ray mask for that node and rayPacket
+        __m256 hit_mask = intersect_bvh_node(packet, node);
+        
+        // convert hit_mask to int, if the int is 0, all rays missed.
+        if (simd_movemask(hit_mask) == 0) {
+            continue; // Skip this box and everything inside it entirely.
+        }
+
+        // check if node hit is a leaf or branch
+        // leaf if there is triangles, branch of there is bvh children
+        if (node.triangle_count > 0) {
+            // Loop through the triangles and test them.
+            uint32_t start_tri = node.left_first;
+            uint32_t end_tri = start_tri + node.triangle_count;
+
+            for (uint32_t i = start_tri; i < end_tri; ++i) {
+                intersect_triangle(packet, engine.triangles[i]);
+            }
+        } else {
+            // Push the Left and Right child indices onto the stack.
+            // Because of our Phase 1 memory layout, the Right child is always Left + 1.
+            stack[stack_ptr++] = node.left_first;     // Push Left Child
+            stack[stack_ptr++] = node.left_first + 1; // Push Right Child
+        }
+    }
+}
