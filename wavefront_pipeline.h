@@ -174,3 +174,4 @@ inline void intersect_triangle_packet(RayPacket& packet, const Triangle& tri, __
 
   simd_store_int(packet.hit_material_id, blended_mat);
 }
+

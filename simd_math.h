@@ -136,3 +136,9 @@ inline __m256i simd_blend_int(__m256i old_val, __m256i new_val, __m256 mask) {
     // per 32-bit float slot (which _mm256_cmp_ps guarantees), this works perfectly for uint32_t.
     return _mm256_blendv_epi8(old_val, new_val, _mm256_castps_si256(mask));
 }
+
+// takes 256 bit mask, extracts the top bit of each of the 8 floats, and packs it into an int.
+// so mask to int for use in cpp
+inline int simd_movemask(__m256 mask) {
+    return _mm256_movemask_ps(mask);
+}
