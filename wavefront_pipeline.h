@@ -207,7 +207,7 @@ inline void traverse_bvh(RayPacket& packet, const EngineState& engine) {
             uint32_t end_tri = start_tri + node.triangle_count;
 
             for (uint32_t i = start_tri; i < end_tri; ++i) {
-                intersect_triangle(packet, engine.triangles[i]);
+              intersect_triangle_packet(packet, engine.triangles[i], hit_mask);
             }
         } else {
             // Push the Left and Right child indices onto the stack.

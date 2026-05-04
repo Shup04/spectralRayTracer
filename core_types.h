@@ -70,3 +70,15 @@ struct alignas(64) Triangle {
     float norm_x, norm_y, norm_z; // Pre-calculated during .stl loading
     float padding3;        // empty stace
 };
+
+// the only dynamically allocated object at startup
+// contains raw pointers to our alignes memory blocks
+struct EngineState {
+    BVHNode* bvh_nodes;
+    Material* materials;
+    Triangle* triangles;
+
+    uint32_t total_bvh_nodes;
+    uint32_t total_materials;
+    uint32_t total_triangles;
+};
