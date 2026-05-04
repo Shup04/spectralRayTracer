@@ -1,5 +1,6 @@
 #pragma once
 #include <immintrin.h>
+#include <cstdint>
 
 // Memory Operations (Load/Store)
 
@@ -9,9 +10,17 @@ inline __m256 simd_load(const float* aligned_mem) {
     return _mm256_load_ps(aligned_mem);
 }
 
+inline __m256i simd_load_int(const uint32_t* p) {
+    return _mm256_load_si256(reinterpret_cast<const __m256i*>(p));
+}
+
 // Stores the contents of a 256-bit register back into 32 bytes of RAM.
 inline void simd_store(float* aligned_mem, __m256 reg) {
     _mm256_store_ps(aligned_mem, reg);
+}
+
+inline void simd_store_int(uint32_t* p, __m256i v) {
+    _mm256_store_si256(reinterpret_cast<__m256i*>(p), v);
 }
 
 // Broadcasts a single float into all 8 slots of a register (e.g., [1.0, 1.0...])
@@ -19,9 +28,18 @@ inline __m256 simd_set1(float val) {
     return _mm256_set1_ps(val);
 }
 
+inline __m256i simd_set1_int(uint32_t x) {
+    return _mm256_set1_epi32(static_cast<int>(x));
+}
+
 // Sets all 8 slots to 0.0f (Hardware optimization: usually executes via an XOR)
 inline __m256 simd_zero() {
     return _mm256_setzero_ps();
+}
+
+inline __m256 simd_abs(__m256 x) {
+    __m256 sign_mask = _mm256_set1_ps(-0.0f);
+    return _mm256_andnot_ps(sign_mask, x);
 }
 
 // Core Math
@@ -76,14 +94,26 @@ inline __m256 simd_cmp_less(__m256 a, __m256 b) {
     return _mm256_cmp_ps(a, b, _CMP_LT_OQ);
 }
 
+inline __m256 simd_cmp_less_equal(__m256 a, __m256 b) {
+    return _mm256_cmp_ps(a, b, _CMP_LE_OQ);
+}
+
 // a > b = 1
 inline __m256 simd_cmp_greater(__m256 a, __m256 b) {
     return _mm256_cmp_ps(a, b, _CMP_GT_OQ);
 }
 
+inline __m256 simd_cmp_greater_equal(__m256 a, __m256 b) {
+    return _mm256_cmp_ps(a, b, _CMP_GE_OQ);
+}
+
 // bitwise and to combine masks
 inline __m256 simd_and(__m256 mask1, __m256 mask2) {
     return _mm256_and_ps(mask1, mask2);
+}
+
+inline __m256 simd_or(__m256 a, __m256 b) {
+    return _mm256_or_ps(a, b);
 }
 
 inline __m256 simd_min(__m256 a, __m256 b) {

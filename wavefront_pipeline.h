@@ -1,5 +1,4 @@
 #pragma once
-#include <immintrin.h>
 #include "core_types.h"
 #include "simd_math.h"
 
