@@ -86,6 +86,14 @@ inline __m256 simd_and(__m256 mask1, __m256 mask2) {
     return _mm256_and_ps(mask1, mask2);
 }
 
+inline __m256 simd_min(__m256 a, __m256 b) {
+    return _mm256_min_ps(a, b);
+}
+
+inline __m256 simd_max(__m256 a, __m256 b) {
+    return _mm256_max_ps(a, b);
+}
+
 // hardware blend
 // apply mask to old and new, if 1 take new if 0 take old
 inline __m256 simd_blend(__m256 old_val, __m256 new_val, __m256 mask) {

@@ -30,6 +30,10 @@ struct alignas(32) RayPacket {
     float dir_y[8];
     float dir_z[8];
 
+    float inv_dir_x[8];
+    float inv_dir_y[8];
+    float inv_dir_z[8];
+
     // wavelengths: 8 bands spanning the spectrum (8 * 32 bytes)
     float spectrum_b0[8]; 
     float spectrum_b1[8];
