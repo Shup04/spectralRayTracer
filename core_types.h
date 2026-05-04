@@ -51,3 +51,22 @@ struct alignas(32) RayPacket {
     float normal_z[8];           // Surface normal Z
     uint32_t hit_material_id[8]; // Material ID of the closest hit
 };
+
+// 64 byte
+struct alignas(64) Triangle {
+    // 16 byte: vertex
+    float v0_x, v0_y, v0_z;
+    uint32_t material_id;  
+
+    // 16 byte: edge1
+    float e1_x, e1_y, e1_z;
+    float padding1;        // empty space 
+
+    // 16 byte: edge2
+    float e2_x, e2_y, e2_z;
+    float padding2;        // empty space
+
+    // 16 byte
+    float norm_x, norm_y, norm_z; // Pre-calculated during .stl loading
+    float padding3;        // empty stace
+};
