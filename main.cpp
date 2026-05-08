@@ -55,6 +55,9 @@ int main() {
     engine.total_materials = 1;
     engine.materials = (Material*)_mm_malloc(sizeof(Material) * engine.total_materials, 64);
 
+    // Setup sky
+    const float sky_spectrum[8] = { 1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.5f, 0.5f };
+
     // 3. SET UP DISPLAY
     const int width = 800;
     const int height = 600;
@@ -92,19 +95,84 @@ int main() {
 
             // If packet has 8 rays, fully populated
             if (ray_idx == 8) {
-                traverse_bvh(packet, engine);
-                int pixel_base = (y * width + x) - 7;
+                // 1. INITIALIZE THE RAYS
+                bool active[8] = {true, true, true, true, true, true, true, true};
+                
+                // Final accumulated colors for these 8 pixels
+                float pixel_r[8] = {0}, pixel_g[8] = {0}, pixel_b[8] = {0};
+
+                // Initialize Throughput to 1.0 (Full Energy)
                 for (int i = 0; i < 8; ++i) {
-                    if (packet.closest_t[i] > 1e29f) {
-                        framebuffer[pixel_base + i] = {30, 30, 30};
-                    } else {
-                        framebuffer[pixel_base + i] = {
-                            normal_to_color(packet.normal_x[i]),
-                            normal_to_color(packet.normal_y[i]),
-                            normal_to_color(packet.normal_z[i])
-                        };
+                    packet.spectrum_b0[i] = 1.0f; packet.spectrum_b1[i] = 1.0f;
+                    packet.spectrum_b2[i] = 1.0f; packet.spectrum_b3[i] = 1.0f;
+                    packet.spectrum_b4[i] = 1.0f; packet.spectrum_b5[i] = 1.0f;
+                    packet.spectrum_b6[i] = 1.0f; packet.spectrum_b7[i] = 1.0f;
+                }
+
+                // 2. THE BOUNCE LOOP (Max 3 bounces for now)
+                for (int bounce = 0; bounce < 3; ++bounce) {
+                    
+                    traverse_bvh(packet, engine);
+
+                    for (int i = 0; i < 8; ++i) {
+                        if (!active[i]) continue; // Skip dead rays
+
+                        if (packet.closest_t[i] > 1e29f) {
+                            // --- HIT THE SKY ---
+                            // Multiply remaining throughput by the sky emission
+                            // For visualization, let's map the 8 bands directly to RGB
+                            // (Assuming b0-b2 = Blue, b3-b4 = Green, b5-b7 = Red)
+                            pixel_b[i] += (packet.spectrum_b0[i] * sky_spectrum[0] + packet.spectrum_b1[i] * sky_spectrum[1]) * 0.5f;
+                            pixel_g[i] += (packet.spectrum_b3[i] * sky_spectrum[3] + packet.spectrum_b4[i] * sky_spectrum[4]) * 0.5f;
+                            pixel_r[i] += (packet.spectrum_b6[i] * sky_spectrum[6] + packet.spectrum_b7[i] * sky_spectrum[7]) * 0.5f;
+                            
+                            active[i] = false; // Ray is done.
+                        } else {
+                            // --- HIT THE MODEL ---
+                            // 1. Material Absorption (Dummy 80% white material for now)
+                            packet.spectrum_b0[i] *= 0.8f; packet.spectrum_b1[i] *= 0.8f;
+                            packet.spectrum_b2[i] *= 0.8f; packet.spectrum_b3[i] *= 0.8f;
+                            packet.spectrum_b4[i] *= 0.8f; packet.spectrum_b5[i] *= 0.8f;
+                            packet.spectrum_b6[i] *= 0.8f; packet.spectrum_b7[i] *= 0.8f;
+
+                            // 2. Scatter (Basic hemisphere offset)
+                            // We use a cheap pseudo-random offset based on pixel coords to scatter
+                            float rx = ((x * 13 + y * 71 + bounce * 17) % 100) / 100.0f - 0.5f;
+                            float ry = ((x * 37 + y * 19 + bounce * 23) % 100) / 100.0f - 0.5f;
+                            float rz = ((x * 59 + y * 43 + bounce * 31) % 100) / 100.0f - 0.5f;
+
+                            float nx = packet.normal_x[i] + rx;
+                            float ny = packet.normal_y[i] + ry;
+                            float nz = packet.normal_z[i] + rz;
+                            float len = std::sqrt(nx*nx + ny*ny + nz*nz);
+
+                            packet.dir_x[i] = nx / len;
+                            packet.dir_y[i] = ny / len;
+                            packet.dir_z[i] = nz / len;
+
+                            // 3. Update Origin and Reset limits for next traverse
+                            packet.origin_x[i] += packet.normal_x[i] * 0.001f;
+                            packet.origin_y[i] += packet.normal_y[i] * 0.001f;
+                            packet.origin_z[i] += packet.normal_z[i] * 0.001f;
+
+                            packet.inv_dir_x[i] = 1.0f / (packet.dir_x[i] == 0.0f ? 1e-8f : packet.dir_x[i]);
+                            packet.inv_dir_y[i] = 1.0f / (packet.dir_y[i] == 0.0f ? 1e-8f : packet.dir_y[i]);
+                            packet.inv_dir_z[i] = 1.0f / (packet.dir_z[i] == 0.0f ? 1e-8f : packet.dir_z[i]);
+                            packet.closest_t[i] = 1e30f;
+                        }
                     }
                 }
+
+                // 3. WRITE TO FRAMEBUFFER
+                int pixel_base = (y * width + x) - 7;
+                for (int i = 0; i < 8; ++i) {
+                    // Convert the 0.0 - 1.0 float to a 0-255 RGB byte
+                    int r = std::min(255, std::max(0, (int)(pixel_r[i] * 255.0f)));
+                    int g = std::min(255, std::max(0, (int)(pixel_g[i] * 255.0f)));
+                    int b = std::min(255, std::max(0, (int)(pixel_b[i] * 255.0f)));
+                    framebuffer[pixel_base + i] = {(uint8_t)r, (uint8_t)g, (uint8_t)b};
+                }
+                
                 ray_idx = 0;
             }
         }
