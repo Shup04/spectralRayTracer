@@ -8,6 +8,16 @@
 struct SIMDRand {
     __m256i state; // 8 independent 32-bit seeds
 
+    // Initialize with 8 distinct, non-zero seeds
+    inline void init(uint32_t base_seed) {
+        // We add prime numbers to ensure no lane gets the exact same starting seed,
+        // and to guarantee no lane ever accidentally starts with exactly 0.
+        state = _mm256_set_epi32(
+            base_seed + 1, base_seed + 7, base_seed + 13, base_seed + 19,
+            base_seed + 23, base_seed + 29, base_seed + 31, base_seed + 37
+        );
+    }
+
     // Xorshift32: Very fast, perfectly suited for SIMD
     inline __m256 next_float() {
         state = _mm256_xor_si256(state, _mm256_slli_epi32(state, 13));
@@ -17,7 +27,27 @@ struct SIMDRand {
         // Convert to float between 0.0 and 1.0
         __m256i mask = _mm256_set1_epi32(0x7FFFFFFF);
         __m256i masked = _mm256_and_si256(state, mask);
-        return _mm256_mul_ps(_mm256_cvtepi32_ps(masked), _mm256_set1_ps(1.0f / 2147483647.0f));
+        
+        // Note: 4.6566129e-10f is exactly 1.0f / 2147483647.0f. 
+        // Hardcoding the float literal saves the compiler from having to compute it.
+        return _mm256_mul_ps(_mm256_cvtepi32_ps(masked), _mm256_set1_ps(4.6566129e-10f));
+    }
+
+    // Helper to pull a single random float (used for our scalar scatter loop)
+    inline float next_float_scalar() {
+        // Extract the current state from lane 0
+        uint32_t s = _mm256_extract_epi32(state, 0);
+        
+        // Standard 32-bit Xorshift on that single integer
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        
+        // Insert the updated state back into lane 0 so it keeps advancing
+        state = _mm256_insert_epi32(state, s, 0);
+        
+        // Convert to float between 0.0 and 1.0
+        return (s & 0x7FFFFFFF) * 4.6566129e-10f;
     }
 };
 
