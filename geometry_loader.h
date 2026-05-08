@@ -3,9 +3,13 @@
 #include <fstream>
 #include <vector>
 #include <cmath>
+#include <algorithm>
 
 #include <immintrin.h>
 #include "core_types.h"
+
+//Helper for tracking which node we are filling
+uint32_t nodes_used = 1;
 
 inline void translate_model(EngineState& engine, float tx, float ty, float tz) {
     for (uint32_t i = 0; i < engine.total_triangles; ++i) {
@@ -102,45 +106,99 @@ inline void rotate_model_z(EngineState& engine, float angle_degrees) {
     }
 }
 
-inline void build_stub_bvh(EngineState& engine) {
-    // We only have one node: the root
-    BVHNode& root = engine.bvh_nodes[0];
+void update_node_bounds(uint32_t node_idx, EngineState& engine, uint32_t first, uint32_t count) {
+    BVHNode& node = engine.bvh_nodes[node_idx];
     
-    float min_x = 1e30f, min_y = 1e30f, min_z = 1e30f;
-    float max_x = -1e30f, max_y = -1e30f, max_z = -1e30f;
+    // Reset to "infinite" inverse bounds
+    node.min_x = node.min_y = node.min_z = 1e30f;
+    node.max_x = node.max_y = node.max_z = -1e30f;
 
-    // Scan every triangle to find the outer limits of the model
-    for (uint32_t i = 0; i < engine.total_triangles; ++i) {
-        const Triangle& tri = engine.triangles[i];
+    for (uint32_t i = 0; i < count; i++) {
+        const Triangle& tri = engine.triangles[first + i];
         
-        // Check V0
-        min_x = std::min(min_x, tri.v0_x); max_x = std::max(max_x, tri.v0_x);
-        min_y = std::min(min_y, tri.v0_y); max_y = std::max(max_y, tri.v0_y);
-        min_z = std::min(min_z, tri.v0_z); max_z = std::max(max_z, tri.v0_z);
+        // Extract all three vertices
+        float v0x = tri.v0_x, v0y = tri.v0_y, v0z = tri.v0_z;
+        float v1x = tri.v0_x + tri.e1_x, v1y = tri.v0_y + tri.e1_y, v1z = tri.v0_z + tri.e1_z;
+        float v2x = tri.v0_x + tri.e2_x, v2y = tri.v0_y + tri.e2_y, v2z = tri.v0_z + tri.e2_z;
 
-        // Check V1 (V0 + E1)
-        float v1x = tri.v0_x + tri.e1_x;
-        float v1y = tri.v0_y + tri.e1_y;
-        float v1z = tri.v0_z + tri.e1_z;
-        min_x = std::min(min_x, v1x); max_x = std::max(max_x, v1x);
-        min_y = std::min(min_y, v1y); max_y = std::max(max_y, v1y);
-        min_z = std::min(min_z, v1z); max_z = std::max(max_z, v1z);
+        // Tighten the box around all vertices of this triangle
+        node.min_x = std::min({node.min_x, v0x, v1x, v2x});
+        node.max_x = std::max({node.max_x, v0x, v1x, v2x});
+        
+        node.min_y = std::min({node.min_y, v0y, v1y, v2y});
+        node.max_y = std::max({node.max_y, v0y, v1y, v2y});
+        
+        node.min_z = std::min({node.min_z, v0z, v1z, v2z});
+        node.max_z = std::max({node.max_z, v0z, v1z, v2z});
+    }
+}
 
-        // Check V2 (V0 + E2)
-        float v2x = tri.v0_x + tri.e2_x;
-        float v2y = tri.v0_y + tri.e2_y;
-        float v2z = tri.v0_z + tri.e2_z;
-        min_x = std::min(min_x, v2x); max_x = std::max(max_x, v2x);
-        min_y = std::min(min_y, v2y); max_y = std::max(max_y, v2y);
-        min_z = std::min(min_z, v2z); max_z = std::max(max_z, v2z);
+void subdivide(uint32_t node_idx, EngineState& engine, uint32_t first, uint32_t count) {
+    BVHNode& node = engine.bvh_nodes[node_idx];
+
+    // 1. Calculate the bounding box for this node
+    update_node_bounds(node_idx, engine, first, count);
+
+    // 2. Base Case: If triangle count is small, this is a leaf node
+    if (count <= 4) {
+        node.left_first = first;
+        node.triangle_count = count;
+        return;
     }
 
-    // Set the root node to perfectly fit the model
-    root.min_x = min_x - 0.01f; root.min_y = min_y - 0.01f; root.min_z = min_z - 0.01f;
-    root.max_x = max_x + 0.01f; root.max_y = max_y + 0.01f; root.max_z = max_z + 0.01f;
+    // 3. Internal Node: We need to split
+    // Determine which axis to split on (choose the longest axis of the box)
+    float extent_x = node.max_x - node.min_x;
+    float extent_y = node.max_y - node.min_y;
+    float extent_z = node.max_z - node.min_z;
+    int axis = 0; // 0=x, 1=y, 2=z
+    if (extent_y > extent_x) axis = 1;
+    if (extent_z > (axis == 0 ? extent_x : extent_y)) axis = 2;
+
+    float split_pos = (axis == 0) ? (node.min_x + extent_x * 0.5f) :
+                      (axis == 1) ? (node.min_y + extent_y * 0.5f) :
+                                    (node.min_z + extent_z * 0.5f);
+
+    // 4. Partition triangles around the split plane using their centroids
+    uint32_t i = first;
+    uint32_t j = i + count - 1;
+    while (i <= j) {
+        const Triangle& tri = engine.triangles[i];
+        float centroid = (axis == 0) ? (tri.v0_x + (tri.e1_x + tri.e2_x) * 0.333f) :
+                         (axis == 1) ? (tri.v0_y + (tri.e1_y + tri.e2_y) * 0.333f) :
+                                       (tri.v0_z + (tri.e1_z + tri.e2_z) * 0.333f);
+        if (centroid < split_pos) {
+            i++;
+        } else {
+            std::swap(engine.triangles[i], engine.triangles[j]);
+            j--;
+        }
+    }
+
+    // 5. Create Child Nodes
+    uint32_t left_count = i - first;
+    if (left_count == 0 || left_count == count) {
+        // Fallback: If partitioning fails to split the group, just force a leaf
+        node.left_first = first;
+        node.triangle_count = count;
+        return;
+    }
+
+    uint32_t left_child_idx = nodes_used++;
+    nodes_used++; // Right child is always left_child_idx + 1
     
-    root.left_first = 0; // Point to triangle index 0
-    root.triangle_count = engine.total_triangles; // Put EVERY triangle in this one box
+    node.left_first = left_child_idx;
+    node.triangle_count = 0; // 0 means this is a branch, not a leaf
+
+    subdivide(left_child_idx, engine, first, left_count);
+    subdivide(left_child_idx + 1, engine, i, count - left_count);
+}
+
+// The new main entry point for BVH generation
+inline void build_bvh(EngineState& engine) {
+    nodes_used = 1; // Reset node counter (0 is root)
+    subdivide(0, engine, 0, engine.total_triangles);
+    std::cout << "BVH Built. Nodes used: " << nodes_used << "\n";
 }
 
 inline bool load_binary_stl(const std::string& filepath, EngineState& engine) {

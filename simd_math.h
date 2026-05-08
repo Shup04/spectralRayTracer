@@ -4,6 +4,23 @@
 
 #include "core_types.h"
 
+// 8-way Parallel Random Number Generator
+struct SIMDRand {
+    __m256i state; // 8 independent 32-bit seeds
+
+    // Xorshift32: Very fast, perfectly suited for SIMD
+    inline __m256 next_float() {
+        state = _mm256_xor_si256(state, _mm256_slli_epi32(state, 13));
+        state = _mm256_xor_si256(state, _mm256_srli_epi32(state, 17));
+        state = _mm256_xor_si256(state, _mm256_slli_epi32(state, 5));
+        
+        // Convert to float between 0.0 and 1.0
+        __m256i mask = _mm256_set1_epi32(0x7FFFFFFF);
+        __m256i masked = _mm256_and_si256(state, mask);
+        return _mm256_mul_ps(_mm256_cvtepi32_ps(masked), _mm256_set1_ps(1.0f / 2147483647.0f));
+    }
+};
+
 // Memory Operations (Load/Store)
 
 // Loads exactly 32 bytes (8 floats) from memory into a CPU register.

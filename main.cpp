@@ -45,11 +45,11 @@ int main() {
     EngineState engine;
     
     // 1. LOAD AND BUILD (These handle their own mallocs)
-    if (!load_binary_stl("atlas2.stl", engine)) return -1;
+    if (!load_binary_stl("orc.stl", engine)) return -1;
     rotate_model_x(engine, -90.0f);
 
     rotate_model_y(engine, 180.0f);
-    build_stub_bvh(engine);
+    build_bvh(engine);
 
     // 2. MANUALLY ALLOCATE ONLY THE MATERIALS
     engine.total_materials = 1;
@@ -90,6 +90,7 @@ int main() {
             packet.closest_t[ray_idx] = 1e30f;
             ray_idx++;
 
+            // If packet has 8 rays, fully populated
             if (ray_idx == 8) {
                 traverse_bvh(packet, engine);
                 int pixel_base = (y * width + x) - 7;
