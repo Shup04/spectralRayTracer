@@ -80,7 +80,7 @@ int main() {
             // We set origin_z to 5.0f to move the camera BACK so we can see the model at the origin.
             packet.origin_x[ray_idx] = 0.0f;
             packet.origin_y[ray_idx] = 0.0f;
-            packet.origin_z[ray_idx] = 150.0f; 
+            packet.origin_z[ray_idx] = 80.0f; 
 
             packet.dir_x[ray_idx] = ndc_x / len;
             packet.dir_y[ray_idx] = ndc_y / len;
@@ -129,11 +129,15 @@ int main() {
                             active[i] = false; // Ray is done.
                         } else {
                             // --- HIT THE MODEL ---
-                            // 1. Material Absorption (Dummy 80% white material for now)
-                            packet.spectrum_b0[i] *= 0.8f; packet.spectrum_b1[i] *= 0.8f;
-                            packet.spectrum_b2[i] *= 0.8f; packet.spectrum_b3[i] *= 0.8f;
-                            packet.spectrum_b4[i] *= 0.8f; packet.spectrum_b5[i] *= 0.8f;
-                            packet.spectrum_b6[i] *= 0.8f; packet.spectrum_b7[i] *= 0.8f;
+                            // 1. Material Absorption: COPPER (Absorb Blue, Reflect Red)
+                            packet.spectrum_b0[i] *= 0.2f; // Kill UV/Blue
+                            packet.spectrum_b1[i] *= 0.3f;
+                            packet.spectrum_b2[i] *= 0.4f;
+                            packet.spectrum_b3[i] *= 0.6f; // Moderate Green
+                            packet.spectrum_b4[i] *= 0.7f;
+                            packet.spectrum_b5[i] *= 0.8f;
+                            packet.spectrum_b6[i] *= 0.9f; // High Red
+                            packet.spectrum_b7[i] *= 0.95f; // High IR
 
                             // 2. Scatter (Basic hemisphere offset)
                             // We use a cheap pseudo-random offset based on pixel coords to scatter
