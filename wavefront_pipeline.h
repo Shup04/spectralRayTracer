@@ -63,13 +63,18 @@ inline __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& node, _
 
   __m256 t_near = simd_max(t_near_x, simd_max(t_near_y, t_near_z));
   __m256 t_far = simd_min(t_far_x, simd_min(t_far_y, t_far_z));
+  __m256 closest_t = simd_load(packet.closest_t);
 
-  // branchless check, make a mask of rays that hit, AND are front faces.
+  // Do not let dead lanes keep the BVH traversal alive.
   __m256 hit_mask = simd_cmp_greater(t_far, t_near);
   __m256 front_mask = simd_cmp_greater(t_far, simd_set1(0.001f));
 
-  // Do not let dead lanes keep the BVH traversal alive.
+  // If the box starts beyond the closest triangle already found,
+  // this box cannot improve the result for that lane.
+  __m256 closer_than_current_hit = simd_cmp_less(t_near, closest_t);
+
   hit_mask = simd_and(hit_mask, front_mask);
+  hit_mask = simd_and(hit_mask, closer_than_current_hit);
   hit_mask = simd_and(hit_mask, alive_mask);
 
   return hit_mask;
