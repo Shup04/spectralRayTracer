@@ -59,6 +59,30 @@ int main() {
 
     // Setup sky
     const float sky_spectrum[8] = { 1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.5f, 0.5f };
+    float tmp_sun_dx = 0.45f;
+    float tmp_sun_dy = 0.75f;
+    float tmp_sun_dz = 0.50f;
+
+    float tmp_sun_len = std::sqrt(
+        tmp_sun_dx * tmp_sun_dx +
+        tmp_sun_dy * tmp_sun_dy +
+        tmp_sun_dz * tmp_sun_dz
+    );
+
+    const float SUN_DX = tmp_sun_dx / tmp_sun_len;
+    const float SUN_DY = tmp_sun_dy / tmp_sun_len;
+    const float SUN_DZ = tmp_sun_dz / tmp_sun_len;
+
+    const float COPPER_DIFF_R = 0.75f;
+    const float COPPER_DIFF_G = 0.38f;
+    const float COPPER_DIFF_B = 0.14f;
+
+    const float COPPER_SPEC_R = 1.50f;
+    const float COPPER_SPEC_G = 0.85f;
+    const float COPPER_SPEC_B = 0.35f;
+
+    const float METAL_ROUGHNESS = 0.18f;
+    const float RAY_EPSILON = 0.01f;
 
     // 3. SET UP DISPLAY
     const int width = 800;
@@ -128,7 +152,23 @@ int main() {
                   // 2. THE BOUNCE LOOP (Max 3 bounces for now)
                   for (int bounce = 0; bounce < 3; ++bounce) {
                       
-                      traverse_bvh(packet, engine);
+                      // BVH Traversal
+                      uint8_t alive_bits = 0;
+
+                      for (int lane = 0; lane < 8; ++lane) {
+                          if (active[lane]) {
+                              alive_bits |= (1u << lane);
+                          }
+                      }
+
+                      if (alive_bits == 0) {
+                          break;
+                      }
+
+                      __m256 alive_mask = simd_mask_from_bits(alive_bits);
+
+                      traverse_bvh(packet, engine, alive_mask);
+                      // end BVH Traversal
 
                       for (int i = 0; i < 8; ++i) {
                           if (!active[i]) continue; // Skip dead rays
@@ -141,18 +181,11 @@ int main() {
                               float g_light = sky_spectrum[3] * 0.5f;
                               float b_light = sky_spectrum[0] * 0.5f;
 
-                              // 2. The SUN (Directional Light)
-                              // Let's put a bright sun high and to the right
-                              float sun_dx = 0.5f, sun_dy = 0.8f, sun_dz = 1.0f; 
-                              
-                              // Normalize the sun vector
-                              float sun_len = std::sqrt(sun_dx*sun_dx + sun_dy*sun_dy + sun_dz*sun_dz);
-                              sun_dx /= sun_len; sun_dy /= sun_len; sun_dz /= sun_len;
-
-                              // Calculate Dot Product to see if the ray is pointing at the sun
-                              float dot = (packet.dir_x[i] * sun_dx) + 
-                                          (packet.dir_y[i] * sun_dy) + 
-                                          (packet.dir_z[i] * sun_dz);
+                              // 2. The sun
+                              float dot =
+                                  packet.dir_x[i] * SUN_DX +
+                                  packet.dir_y[i] * SUN_DY +
+                                  packet.dir_z[i] * SUN_DZ;
 
                               // If the ray is within the "disc" of the sun, blast it with energy
                               if (dot > 0.98f) { 
@@ -235,9 +268,9 @@ int main() {
 
                             float ndotl = std::max(
                                 0.0f,
-                                surf_nx * sun_dx +
-                                surf_ny * sun_dy +
-                                surf_nz * sun_dz
+                                surf_nx * SUN_DX +
+                                surf_ny * SUN_DY +
+                                surf_nz * SUN_DZ
                             );
 
                             float diffuse = 0.03f + 0.18f * ndotl;
@@ -248,24 +281,16 @@ int main() {
                             // This gives it the shiny metal read.
                             // View direction points back toward the camera.
 
+                            // Ray directions should already be normalized, so view = -old_dir.
+                            // No need to normalize view every hit.
                             float view_dx = -old_dx;
                             float view_dy = -old_dy;
                             float view_dz = -old_dz;
 
-                            float view_len = std::sqrt(
-                                view_dx * view_dx +
-                                view_dy * view_dy +
-                                view_dz * view_dz
-                            );
-
-                            view_dx /= view_len;
-                            view_dy /= view_len;
-                            view_dz /= view_len;
-
-                            // Blinn-Phong half vector between sun direction and view direction.
-                            float half_x = sun_dx + view_dx;
-                            float half_y = sun_dy + view_dy;
-                            float half_z = sun_dz + view_dz;
+                            // Blinn-Phong half vector.
+                            float half_x = SUN_DX + view_dx;
+                            float half_y = SUN_DY + view_dy;
+                            float half_z = SUN_DZ + view_dz;
 
                             float half_len = std::sqrt(
                                 half_x * half_x +
@@ -284,9 +309,16 @@ int main() {
                                 surf_nz * half_z
                             );
 
-                            // Higher power means tighter, sharper highlight.
-                            // Lower power means softer, rougher highlight.
-                            float spec = std::pow(ndoth, 80.0f);
+                            // Faster than std::pow(ndoth, 80.0f).
+                            // This gives roughly a sharp metallic highlight.
+                            float s2  = ndoth * ndoth;
+                            float s4  = s2 * s2;
+                            float s8  = s4 * s4;
+                            float s16 = s8 * s8;
+                            float s32 = s16 * s16;
+                            float s64 = s32 * s32;
+
+                            float spec = s64;
 
                             // ----------------------------------------------------
                             // 6. ADD DIRECT COPPER LIGHT TO THIS PIXEL
@@ -295,9 +327,9 @@ int main() {
                             // The diffuse part is small.
                             // The specular part is stronger and copper-tinted.
 
-                            float direct_r = diffuse * 0.75f + spec * 1.50f;
-                            float direct_g = diffuse * 0.38f + spec * 0.85f;
-                            float direct_b = diffuse * 0.14f + spec * 0.35f;
+                            float direct_r = diffuse * COPPER_DIFF_R + spec * COPPER_SPEC_R;
+                            float direct_g = diffuse * COPPER_DIFF_G + spec * COPPER_SPEC_G;
+                            float direct_b = diffuse * COPPER_DIFF_B + spec * COPPER_SPEC_B;
 
                             pixel_r[i] += packet.spectrum_b6[i] * direct_r;
                             pixel_g[i] += packet.spectrum_b3[i] * direct_g;
@@ -348,24 +380,13 @@ int main() {
                             // ----------------------------------------------------
                             // 9. ADD ROUGHNESS TO THE REFLECTION
                             // ----------------------------------------------------
-                            // Perfect mirror reflection would look too chrome.
-                            // Roughness makes it brushed/aged copper.
+                            float rx = 2.0f * rng.next_float_scalar() - 1.0f;
+                            float ry = 2.0f * rng.next_float_scalar() - 1.0f;
+                            float rz = 2.0f * rng.next_float_scalar() - 1.0f;
 
-                            float u = rng.next_float_scalar();
-                            float v = rng.next_float_scalar();
-
-                            float rz = 1.0f - 2.0f * u;
-                            float r = std::sqrt(std::max(0.0f, 1.0f - rz * rz));
-                            float phi = 2.0f * 3.14159265359f * v;
-
-                            float rx = r * std::cos(phi);
-                            float ry = r * std::sin(phi);
-
-                            float roughness = 0.18f;
-
-                            float new_dx = refl_x + roughness * rx;
-                            float new_dy = refl_y + roughness * ry;
-                            float new_dz = refl_z + roughness * rz;
+                            float new_dx = refl_x + METAL_ROUGHNESS * rx;
+                            float new_dy = refl_y + METAL_ROUGHNESS * ry;
+                            float new_dz = refl_z + METAL_ROUGHNESS * rz;
 
                             float new_len = std::sqrt(
                                 new_dx * new_dx +
@@ -383,9 +404,9 @@ int main() {
                             // This is important.
                             // The next bounce must start at the surface, not back at the camera.
 
-                            packet.origin_x[i] = hit_x + surf_nx * 0.01f;
-                            packet.origin_y[i] = hit_y + surf_ny * 0.01f;
-                            packet.origin_z[i] = hit_z + surf_nz * 0.01f;
+                            packet.origin_x[i] = hit_x + surf_nx * RAY_EPSILON;
+                            packet.origin_y[i] = hit_y + surf_ny * RAY_EPSILON;
+                            packet.origin_z[i] = hit_z + surf_nz * RAY_EPSILON;
 
                             // Update inverse direction for the BVH traversal.
                             packet.inv_dir_x[i] = 1.0f / (packet.dir_x[i] == 0.0f ? 1e-8f : packet.dir_x[i]);

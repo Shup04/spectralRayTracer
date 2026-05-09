@@ -2,8 +2,23 @@
 #include "core_types.h"
 #include "simd_math.h"
 
+inline __m256 simd_mask_from_bits(uint8_t bits) {
+    __m256i mask = _mm256_set_epi32(
+        (bits & 0x80) ? -1 : 0,
+        (bits & 0x40) ? -1 : 0,
+        (bits & 0x20) ? -1 : 0,
+        (bits & 0x10) ? -1 : 0,
+        (bits & 0x08) ? -1 : 0,
+        (bits & 0x04) ? -1 : 0,
+        (bits & 0x02) ? -1 : 0,
+        (bits & 0x01) ? -1 : 0
+    );
+
+    return _mm256_castsi256_ps(mask);
+}
+
 // If ray[i] hits box, its 32bits in the mask are all 1, if missed, all 0
-inline __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& node) {
+inline __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& node, __m256 alive_mask) {
   // turn floats into simd arrays for bitwise math.
   __m256 box_min_x = simd_set1(node.min_x);
   __m256 box_min_y = simd_set1(node.min_y);
@@ -51,9 +66,13 @@ inline __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& node) {
 
   // branchless check, make a mask of rays that hit, AND are front faces.
   __m256 hit_mask = simd_cmp_greater(t_far, t_near);
-  __m256 front_mask = simd_cmp_greater(t_far, simd_zero());
-  
-  return simd_and(hit_mask, front_mask);
+  __m256 front_mask = simd_cmp_greater(t_far, simd_set1(0.001f));
+
+  // Do not let dead lanes keep the BVH traversal alive.
+  hit_mask = simd_and(hit_mask, front_mask);
+  hit_mask = simd_and(hit_mask, alive_mask);
+
+  return hit_mask;
 }
 
 inline void intersect_triangle_packet(RayPacket& packet, const Triangle& tri, __m256 active_mask) {
@@ -177,7 +196,7 @@ inline void intersect_triangle_packet(RayPacket& packet, const Triangle& tri, __
 
 // The bvh stack holds all bvh nodes to check, 
 // when a bvh is hit by at least 1 ray in the packet, its 2 children are pushed to the stack.
-inline void traverse_bvh(RayPacket& packet, const EngineState& engine) {
+inline void traverse_bvh(RayPacket& packet, const EngineState& engine, __m256 alive_mask) {
     // BVH index stack (64 can handle millions of tris)
     uint32_t stack[64];
     uint32_t stack_ptr = 0;
@@ -192,7 +211,7 @@ inline void traverse_bvh(RayPacket& packet, const EngineState& engine) {
         const BVHNode& node = engine.bvh_nodes[node_idx];
 
         // get ray mask for that node and rayPacket
-        __m256 hit_mask = intersect_bvh_node(packet, node);
+        __m256 hit_mask = intersect_bvh_node(packet, node, alive_mask);
         
         // convert hit_mask to int, if the int is 0, all rays missed.
         if (simd_movemask(hit_mask) == 0) {
