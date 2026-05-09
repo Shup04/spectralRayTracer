@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <immintrin.h>
 #include <iostream>
@@ -77,7 +79,7 @@ inline uint32_t make_packet_seed(int sample, int y, int x) {
     return seed;
 }
 
-void render_sample_tiles(
+PROFILE_HOT void render_sample_tiles(
     const EngineState &engine,
     const RenderSettings &settings,
     int sample,
@@ -85,7 +87,8 @@ void render_sample_tiles(
     std::atomic<int> &next_row,
     std::vector<float> &accum_r,
     std::vector<float> &accum_g,
-    std::vector<float> &accum_b) {
+    std::vector<float> &accum_b,
+    RenderStats &stats) {
     RayPacket packet;
     SIMDRand rng;
 
@@ -100,6 +103,7 @@ void render_sample_tiles(
         for (int y = y_begin; y < y_end; ++y) {
             for (int x = 0; x < settings.width; x += 8) {
                 rng.init(make_packet_seed(sample, y, x));
+                stats.primary_packets++;
 
                 bool active[8] = {false, false, false, false, false, false, false, false};
                 float pixel_r[8] = {0.0f};
@@ -110,6 +114,9 @@ void render_sample_tiles(
                     int pixel_x = x + lane;
                     bool valid_pixel = pixel_x < settings.width;
                     active[lane] = valid_pixel;
+                    if (valid_pixel) {
+                        stats.primary_rays++;
+                    }
 
                     packet.spectrum_b0[lane] = 1.0f;
                     packet.spectrum_b1[lane] = 1.0f;
@@ -171,13 +178,17 @@ void render_sample_tiles(
                     }
 
                     __m256 alive_mask = simd_mask_from_bits(alive_bits);
-                    traverse_bvh(packet, engine, alive_mask);
+                    uint32_t active_lanes = static_cast<uint32_t>(__builtin_popcount(static_cast<unsigned int>(alive_bits)));
+                    stats.traversal_packets++;
+                    stats.active_lane_sum += active_lanes;
+                    traverse_bvh(packet, engine, alive_mask, &stats);
 
                     for (int i = 0; i < 8; ++i) {
                         if (!active[i])
                             continue;
 
                         if (packet.closest_t[i] > 1e29f) {
+                            stats.sky_hits++;
                             float r_light = settings.sky_spectrum[6] * 0.5f;
                             float g_light = settings.sky_spectrum[3] * 0.5f;
                             float b_light = settings.sky_spectrum[0] * 0.5f;
@@ -199,6 +210,7 @@ void render_sample_tiles(
 
                             active[i] = false;
                         } else {
+                            stats.surface_hits++;
                             float old_dx = packet.dir_x[i];
                             float old_dy = packet.dir_y[i];
                             float old_dz = packet.dir_z[i];
@@ -428,6 +440,8 @@ int main() {
     std::cout << "Rendering with " << thread_count << " worker threads.\n";
 
     const int tile_rows = 8;
+    std::vector<RenderStats> worker_stats(thread_count);
+    auto render_start = std::chrono::steady_clock::now();
 
     for (int sample = 0; sample < MAX_SAMPLES; ++sample) {
         std::cout << "Rendering Sample " << sample + 1 << "/" << MAX_SAMPLES << "\r" << std::flush;
@@ -446,14 +460,17 @@ int main() {
                 std::ref(next_row),
                 std::ref(accum_r),
                 std::ref(accum_g),
-                std::ref(accum_b));
+                std::ref(accum_b),
+                std::ref(worker_stats[thread_idx]));
         }
 
         for (std::thread &worker : workers) {
             worker.join();
         }
     }
+    auto render_end = std::chrono::steady_clock::now();
 
+    auto convert_start = std::chrono::steady_clock::now();
     for (int p_idx = 0; p_idx < width * height; ++p_idx) {
         float avg_r = accum_r[p_idx] / MAX_SAMPLES;
         float avg_g = accum_g[p_idx] / MAX_SAMPLES;
@@ -468,8 +485,44 @@ int main() {
         int b = std::min(255, std::max(0, static_cast<int>(avg_b * 255.0f)));
         framebuffer[p_idx] = {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
     }
+    auto convert_end = std::chrono::steady_clock::now();
 
     write_ppm_image("image.ppm", width, height, framebuffer);
+
+    RenderStats stats;
+    for (const RenderStats& worker_stat : worker_stats) {
+        stats.add(worker_stat);
+    }
+
+    double render_ms = std::chrono::duration<double, std::milli>(render_end - render_start).count();
+    double convert_ms = std::chrono::duration<double, std::milli>(convert_end - convert_start).count();
+    double render_seconds = render_ms / 1000.0;
+    double mrays_per_second = (stats.primary_rays / 1000000.0) / render_seconds;
+    double avg_active_lanes = stats.traversal_packets > 0
+                                  ? static_cast<double>(stats.active_lane_sum) / stats.traversal_packets
+                                  : 0.0;
+    double nodes_per_ray = stats.primary_rays > 0
+                               ? static_cast<double>(stats.bvh_node_tests) / stats.primary_rays
+                               : 0.0;
+    double tri_packets_per_ray = stats.primary_rays > 0
+                                     ? static_cast<double>(stats.triangle_packet_tests) / stats.primary_rays
+                                     : 0.0;
+    double tri_lanes_per_ray = stats.primary_rays > 0
+                                   ? static_cast<double>(stats.triangle_lane_tests) / stats.primary_rays
+                                   : 0.0;
+
+    std::cout << "\nRender profile\n";
+    std::cout << "  render only: " << render_ms << " ms\n";
+    std::cout << "  final conversion: " << convert_ms << " ms\n";
+    std::cout << "  primary rays: " << stats.primary_rays << "\n";
+    std::cout << "  throughput: " << mrays_per_second << " Mrays/s\n";
+    std::cout << "  traversal packets: " << stats.traversal_packets << "\n";
+    std::cout << "  avg active lanes/traversal: " << avg_active_lanes << "/8\n";
+    std::cout << "  BVH node tests/ray: " << nodes_per_ray << "\n";
+    std::cout << "  triangle packet tests/ray: " << tri_packets_per_ray << "\n";
+    std::cout << "  triangle lane tests/ray: " << tri_lanes_per_ray << "\n";
+    std::cout << "  surface hits: " << stats.surface_hits << "\n";
+    std::cout << "  sky hits: " << stats.sky_hits << "\n";
 
     // CLEANUP
     _mm_free(engine.materials);

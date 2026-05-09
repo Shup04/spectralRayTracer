@@ -2,6 +2,12 @@
 #include <immintrin.h> // Intel AVX/AVX2 intrinsics
 #include <cstdint>
 
+#ifdef PROFILE_SYMBOLS
+#define PROFILE_HOT __attribute__((noinline))
+#else
+#define PROFILE_HOT inline
+#endif
+
 // Material: 64 byte
 struct alignas(32) Material {
   float reflectance[8]; // 32 byte
@@ -81,4 +87,34 @@ struct EngineState {
     uint32_t total_bvh_nodes;
     uint32_t total_materials;
     uint32_t total_triangles;
+};
+
+struct RenderStats {
+    uint64_t primary_packets = 0;
+    uint64_t primary_rays = 0;
+    uint64_t traversal_packets = 0;
+    uint64_t active_lane_sum = 0;
+
+    uint64_t bvh_node_tests = 0;
+    uint64_t bvh_node_hits = 0;
+    uint64_t leaf_visits = 0;
+    uint64_t triangle_packet_tests = 0;
+    uint64_t triangle_lane_tests = 0;
+
+    uint64_t surface_hits = 0;
+    uint64_t sky_hits = 0;
+
+    void add(const RenderStats& other) {
+        primary_packets += other.primary_packets;
+        primary_rays += other.primary_rays;
+        traversal_packets += other.traversal_packets;
+        active_lane_sum += other.active_lane_sum;
+        bvh_node_tests += other.bvh_node_tests;
+        bvh_node_hits += other.bvh_node_hits;
+        leaf_visits += other.leaf_visits;
+        triangle_packet_tests += other.triangle_packet_tests;
+        triangle_lane_tests += other.triangle_lane_tests;
+        surface_hits += other.surface_hits;
+        sky_hits += other.sky_hits;
+    }
 };

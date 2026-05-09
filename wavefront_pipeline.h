@@ -18,7 +18,7 @@ inline __m256 simd_mask_from_bits(uint8_t bits) {
 }
 
 // If ray[i] hits box, its 32bits in the mask are all 1, if missed, all 0
-inline __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& node, __m256 alive_mask) {
+PROFILE_HOT __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& node, __m256 alive_mask) {
   // turn floats into simd arrays for bitwise math.
   __m256 box_min_x = simd_set1(node.min_x);
   __m256 box_min_y = simd_set1(node.min_y);
@@ -80,7 +80,7 @@ inline __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& node, _
   return hit_mask;
 }
 
-inline void intersect_triangle_packet(RayPacket& packet, const Triangle& tri, __m256 active_mask) {
+PROFILE_HOT void intersect_triangle_packet(RayPacket& packet, const Triangle& tri, __m256 active_mask) {
   const __m256 zero = simd_zero();
   const __m256 one  = simd_set1(1.0f);
   const __m256 eps  = simd_set1(1e-8f);
@@ -201,7 +201,7 @@ inline void intersect_triangle_packet(RayPacket& packet, const Triangle& tri, __
 
 // The bvh stack holds all bvh nodes to check, 
 // when a bvh is hit by at least 1 ray in the packet, its 2 children are pushed to the stack.
-inline void traverse_bvh(RayPacket& packet, const EngineState& engine, __m256 alive_mask) {
+PROFILE_HOT void traverse_bvh(RayPacket& packet, const EngineState& engine, __m256 alive_mask, RenderStats* stats = nullptr) {
     // BVH index stack (64 can handle millions of tris)
     uint32_t stack[64];
     uint32_t stack_ptr = 0;
@@ -214,18 +214,31 @@ inline void traverse_bvh(RayPacket& packet, const EngineState& engine, __m256 al
         // Pop the top node index off the stack
         uint32_t node_idx = stack[--stack_ptr];
         const BVHNode& node = engine.bvh_nodes[node_idx];
+        if (stats) {
+            stats->bvh_node_tests++;
+        }
 
         // get ray mask for that node and rayPacket
         __m256 hit_mask = intersect_bvh_node(packet, node, alive_mask);
+        int hit_bits = simd_movemask(hit_mask);
         
         // convert hit_mask to int, if the int is 0, all rays missed.
-        if (simd_movemask(hit_mask) == 0) {
+        if (hit_bits == 0) {
             continue; // Skip this box and everything inside it entirely.
+        }
+        if (stats) {
+            stats->bvh_node_hits++;
         }
 
         // check if node hit is a leaf or branch
         // leaf if there is triangles, branch of there is bvh children
         if (node.triangle_count > 0) {
+            if (stats) {
+                uint32_t active_lanes = static_cast<uint32_t>(__builtin_popcount(static_cast<unsigned int>(hit_bits)));
+                stats->leaf_visits++;
+                stats->triangle_packet_tests += node.triangle_count;
+                stats->triangle_lane_tests += static_cast<uint64_t>(node.triangle_count) * active_lanes;
+            }
             // Loop through the triangles and test them.
             uint32_t start_tri = node.left_first;
             uint32_t end_tri = start_tri + node.triangle_count;
