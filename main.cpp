@@ -1,6 +1,5 @@
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <immintrin.h>
 #include <iostream>
@@ -13,9 +12,10 @@
 #include "simd_math.h"
 #include "wavefront_pipeline.h"
 
-void add_triangle(EngineState &engine, int index, float v0x, float v0y,
-                  float v0z, float v1x, float v1y, float v1z, float v2x,
-                  float v2y, float v2z) {
+void add_triangle(EngineState &engine, int index,
+                  float v0x, float v0y, float v0z,
+                  float v1x, float v1y, float v1z,
+                  float v2x, float v2y, float v2z) {
     Triangle &tri = engine.triangles[index];
 
     // 1. Set V0
@@ -77,12 +77,15 @@ inline uint32_t make_packet_seed(int sample, int y, int x) {
     return seed;
 }
 
-void render_sample_tiles(const EngineState &engine,
-                         const RenderSettings &settings, int sample,
-                         int tile_rows, std::atomic<int> &next_row,
-                         std::vector<float> &accum_r,
-                         std::vector<float> &accum_g,
-                         std::vector<float> &accum_b) {
+void render_sample_tiles(
+    const EngineState &engine,
+    const RenderSettings &settings,
+    int sample,
+    int tile_rows,
+    std::atomic<int> &next_row,
+    std::vector<float> &accum_r,
+    std::vector<float> &accum_g,
+    std::vector<float> &accum_b) {
     RayPacket packet;
     SIMDRand rng;
 
@@ -98,8 +101,7 @@ void render_sample_tiles(const EngineState &engine,
             for (int x = 0; x < settings.width; x += 8) {
                 rng.init(make_packet_seed(sample, y, x));
 
-                bool active[8] = {false, false, false, false,
-                                  false, false, false, false};
+                bool active[8] = {false, false, false, false, false, false, false, false};
                 float pixel_r[8] = {0.0f};
                 float pixel_g[8] = {0.0f};
                 float pixel_b[8] = {0.0f};
@@ -135,9 +137,7 @@ void render_sample_tiles(const EngineState &engine,
                     float jitter_x = rng.next_float_scalar() - 0.5f;
                     float jitter_y = rng.next_float_scalar() - 0.5f;
 
-                    float ndc_x =
-                        (2.0f * (pixel_x + 0.5f + jitter_x) / settings.width - 1.0f) *
-                        settings.aspect_ratio;
+                    float ndc_x = (2.0f * (pixel_x + 0.5f + jitter_x) / settings.width - 1.0f) * settings.aspect_ratio;
                     float ndc_y = 1.0f - 2.0f * (y + 0.5f + jitter_y) / settings.height;
 
                     float len = std::sqrt(ndc_x * ndc_x + ndc_y * ndc_y + 1.0f);
@@ -150,12 +150,9 @@ void render_sample_tiles(const EngineState &engine,
                     packet.dir_y[lane] = ndc_y / len;
                     packet.dir_z[lane] = -1.0f / len;
 
-                    packet.inv_dir_x[lane] =
-                        1.0f / (packet.dir_x[lane] == 0.0f ? 1e-8f : packet.dir_x[lane]);
-                    packet.inv_dir_y[lane] =
-                        1.0f / (packet.dir_y[lane] == 0.0f ? 1e-8f : packet.dir_y[lane]);
-                    packet.inv_dir_z[lane] =
-                        1.0f / (packet.dir_z[lane] == 0.0f ? 1e-8f : packet.dir_z[lane]);
+                    packet.inv_dir_x[lane] = 1.0f / (packet.dir_x[lane] == 0.0f ? 1e-8f : packet.dir_x[lane]);
+                    packet.inv_dir_y[lane] = 1.0f / (packet.dir_y[lane] == 0.0f ? 1e-8f : packet.dir_y[lane]);
+                    packet.inv_dir_z[lane] = 1.0f / (packet.dir_z[lane] == 0.0f ? 1e-8f : packet.dir_z[lane]);
 
                     packet.closest_t[lane] = 1e30f;
                 }
@@ -185,9 +182,10 @@ void render_sample_tiles(const EngineState &engine,
                             float g_light = settings.sky_spectrum[3] * 0.5f;
                             float b_light = settings.sky_spectrum[0] * 0.5f;
 
-                            float dot = packet.dir_x[i] * settings.sun_dx +
-                                        packet.dir_y[i] * settings.sun_dy +
-                                        packet.dir_z[i] * settings.sun_dz;
+                            float dot =
+                                packet.dir_x[i] * settings.sun_dx +
+                                packet.dir_y[i] * settings.sun_dy +
+                                packet.dir_z[i] * settings.sun_dz;
 
                             if (dot > 0.98f) {
                                 r_light += 15.0f;
@@ -216,7 +214,9 @@ void render_sample_tiles(const EngineState &engine,
                             float surf_nz = packet.normal_z[i];
 
                             float facing =
-                                surf_nx * old_dx + surf_ny * old_dy + surf_nz * old_dz;
+                                surf_nx * old_dx +
+                                surf_ny * old_dy +
+                                surf_nz * old_dz;
 
                             if (facing > 0.0f) {
                                 surf_nx = -surf_nx;
@@ -224,9 +224,11 @@ void render_sample_tiles(const EngineState &engine,
                                 surf_nz = -surf_nz;
                             }
 
-                            float ndotl = std::max(0.0f, surf_nx * settings.sun_dx +
-                                                             surf_ny * settings.sun_dy +
-                                                             surf_nz * settings.sun_dz);
+                            float ndotl = std::max(
+                                0.0f,
+                                surf_nx * settings.sun_dx +
+                                    surf_ny * settings.sun_dy +
+                                    surf_nz * settings.sun_dz);
 
                             float diffuse = 0.03f + 0.18f * ndotl;
 
@@ -238,15 +240,20 @@ void render_sample_tiles(const EngineState &engine,
                             float half_y = settings.sun_dy + view_dy;
                             float half_z = settings.sun_dz + view_dz;
 
-                            float half_len = std::sqrt(half_x * half_x + half_y * half_y +
-                                                       half_z * half_z);
+                            float half_len = std::sqrt(
+                                half_x * half_x +
+                                half_y * half_y +
+                                half_z * half_z);
 
                             half_x /= half_len;
                             half_y /= half_len;
                             half_z /= half_len;
 
-                            float ndoth = std::max(0.0f, surf_nx * half_x + surf_ny * half_y +
-                                                             surf_nz * half_z);
+                            float ndoth = std::max(
+                                0.0f,
+                                surf_nx * half_x +
+                                    surf_ny * half_y +
+                                    surf_nz * half_z);
 
                             float s2 = ndoth * ndoth;
                             float s4 = s2 * s2;
@@ -257,12 +264,9 @@ void render_sample_tiles(const EngineState &engine,
 
                             float spec = s64;
 
-                            float direct_r = diffuse * settings.copper_diff_r +
-                                             spec * settings.copper_spec_r;
-                            float direct_g = diffuse * settings.copper_diff_g +
-                                             spec * settings.copper_spec_g;
-                            float direct_b = diffuse * settings.copper_diff_b +
-                                             spec * settings.copper_spec_b;
+                            float direct_r = diffuse * settings.copper_diff_r + spec * settings.copper_spec_r;
+                            float direct_g = diffuse * settings.copper_diff_g + spec * settings.copper_spec_g;
+                            float direct_b = diffuse * settings.copper_diff_b + spec * settings.copper_spec_b;
 
                             pixel_r[i] += packet.spectrum_b6[i] * direct_r;
                             pixel_g[i] += packet.spectrum_b3[i] * direct_g;
@@ -277,8 +281,10 @@ void render_sample_tiles(const EngineState &engine,
                             packet.spectrum_b6[i] *= 0.92f;
                             packet.spectrum_b7[i] *= 0.96f;
 
-                            float energy = packet.spectrum_b0[i] + packet.spectrum_b3[i] +
-                                           packet.spectrum_b6[i];
+                            float energy =
+                                packet.spectrum_b0[i] +
+                                packet.spectrum_b3[i] +
+                                packet.spectrum_b6[i];
 
                             if (energy < 0.02f) {
                                 active[i] = false;
@@ -286,7 +292,9 @@ void render_sample_tiles(const EngineState &engine,
                             }
 
                             float dot_in_n =
-                                old_dx * surf_nx + old_dy * surf_ny + old_dz * surf_nz;
+                                old_dx * surf_nx +
+                                old_dy * surf_ny +
+                                old_dz * surf_nz;
 
                             float refl_x = old_dx - 2.0f * dot_in_n * surf_nx;
                             float refl_y = old_dy - 2.0f * dot_in_n * surf_ny;
@@ -300,8 +308,10 @@ void render_sample_tiles(const EngineState &engine,
                             float new_dy = refl_y + settings.metal_roughness * ry;
                             float new_dz = refl_z + settings.metal_roughness * rz;
 
-                            float new_len = std::sqrt(new_dx * new_dx + new_dy * new_dy +
-                                                      new_dz * new_dz);
+                            float new_len = std::sqrt(
+                                new_dx * new_dx +
+                                new_dy * new_dy +
+                                new_dz * new_dz);
 
                             packet.dir_x[i] = new_dx / new_len;
                             packet.dir_y[i] = new_dy / new_len;
@@ -311,12 +321,9 @@ void render_sample_tiles(const EngineState &engine,
                             packet.origin_y[i] = hit_y + surf_ny * settings.ray_epsilon;
                             packet.origin_z[i] = hit_z + surf_nz * settings.ray_epsilon;
 
-                            packet.inv_dir_x[i] =
-                                1.0f / (packet.dir_x[i] == 0.0f ? 1e-8f : packet.dir_x[i]);
-                            packet.inv_dir_y[i] =
-                                1.0f / (packet.dir_y[i] == 0.0f ? 1e-8f : packet.dir_y[i]);
-                            packet.inv_dir_z[i] =
-                                1.0f / (packet.dir_z[i] == 0.0f ? 1e-8f : packet.dir_z[i]);
+                            packet.inv_dir_x[i] = 1.0f / (packet.dir_x[i] == 0.0f ? 1e-8f : packet.dir_x[i]);
+                            packet.inv_dir_y[i] = 1.0f / (packet.dir_y[i] == 0.0f ? 1e-8f : packet.dir_y[i]);
+                            packet.inv_dir_z[i] = 1.0f / (packet.dir_z[i] == 0.0f ? 1e-8f : packet.dir_z[i]);
 
                             packet.closest_t[i] = 1e30f;
                         }
@@ -351,19 +358,18 @@ int main() {
 
     // 2. MANUALLY ALLOCATE ONLY THE MATERIALS
     engine.total_materials = 1;
-    engine.materials =
-        (Material *)_mm_malloc(sizeof(Material) * engine.total_materials, 64);
+    engine.materials = (Material *)_mm_malloc(sizeof(Material) * engine.total_materials, 64);
 
     // Setup sky
-    const float sky_spectrum[8] = {1.0f, 0.9f, 0.8f, 0.7f,
-                                   0.6f, 0.5f, 0.5f, 0.5f};
+    const float sky_spectrum[8] = {1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.5f, 0.5f};
     float tmp_sun_dx = 0.45f;
     float tmp_sun_dy = 0.75f;
     float tmp_sun_dz = 0.50f;
 
-    float tmp_sun_len =
-        std::sqrt(tmp_sun_dx * tmp_sun_dx + tmp_sun_dy * tmp_sun_dy +
-                  tmp_sun_dz * tmp_sun_dz);
+    float tmp_sun_len = std::sqrt(
+        tmp_sun_dx * tmp_sun_dx +
+        tmp_sun_dy * tmp_sun_dy +
+        tmp_sun_dz * tmp_sun_dz);
 
     const float SUN_DX = tmp_sun_dx / tmp_sun_len;
     const float SUN_DY = tmp_sun_dy / tmp_sun_len;
@@ -381,8 +387,8 @@ int main() {
     const float RAY_EPSILON = 0.01f;
 
     // 3. SET UP DISPLAY
-    const int width = 800;
-    const int height = 600;
+    const int width = 2560;
+    const int height = 1440;
     const float aspect_ratio = (float)width / (float)height;
     std::vector<Pixel> framebuffer(width * height);
 
@@ -394,24 +400,24 @@ int main() {
 
     std::cout << "Firing rays at " << engine.total_triangles << " triangles...\n";
 
-    RenderSettings settings = {width,
-                               height,
-                               3,
-                               aspect_ratio,
-                               {sky_spectrum[0], sky_spectrum[1], sky_spectrum[2],
-                                sky_spectrum[3], sky_spectrum[4], sky_spectrum[5],
-                                sky_spectrum[6], sky_spectrum[7]},
-                               SUN_DX,
-                               SUN_DY,
-                               SUN_DZ,
-                               COPPER_DIFF_R,
-                               COPPER_DIFF_G,
-                               COPPER_DIFF_B,
-                               COPPER_SPEC_R,
-                               COPPER_SPEC_G,
-                               COPPER_SPEC_B,
-                               METAL_ROUGHNESS,
-                               RAY_EPSILON};
+    RenderSettings settings = {
+        width,
+        height,
+        3,
+        aspect_ratio,
+        {sky_spectrum[0], sky_spectrum[1], sky_spectrum[2], sky_spectrum[3],
+         sky_spectrum[4], sky_spectrum[5], sky_spectrum[6], sky_spectrum[7]},
+        SUN_DX,
+        SUN_DY,
+        SUN_DZ,
+        COPPER_DIFF_R,
+        COPPER_DIFF_G,
+        COPPER_DIFF_B,
+        COPPER_SPEC_R,
+        COPPER_SPEC_G,
+        COPPER_SPEC_B,
+        METAL_ROUGHNESS,
+        RAY_EPSILON};
 
     unsigned int thread_count = std::thread::hardware_concurrency();
     if (thread_count == 0) {
@@ -421,21 +427,26 @@ int main() {
 
     std::cout << "Rendering with " << thread_count << " worker threads.\n";
 
+    const int tile_rows = 8;
+
     for (int sample = 0; sample < MAX_SAMPLES; ++sample) {
-        std::cout << "Rendering Sample " << sample + 1 << "/" << MAX_SAMPLES << "\r"
-                  << std::flush;
+        std::cout << "Rendering Sample " << sample + 1 << "/" << MAX_SAMPLES << "\r" << std::flush;
 
         std::vector<std::thread> workers;
         workers.reserve(thread_count);
-
-        const int tile_rows = 8;
         std::atomic<int> next_row{0};
 
         for (unsigned int thread_idx = 0; thread_idx < thread_count; ++thread_idx) {
-            workers.emplace_back(render_sample_tiles, std::cref(engine),
-                                 std::cref(settings), sample, tile_rows,
-                                 std::ref(next_row), std::ref(accum_r),
-                                 std::ref(accum_g), std::ref(accum_b));
+            workers.emplace_back(
+                render_sample_tiles,
+                std::cref(engine),
+                std::cref(settings),
+                sample,
+                tile_rows,
+                std::ref(next_row),
+                std::ref(accum_r),
+                std::ref(accum_g),
+                std::ref(accum_b));
         }
 
         for (std::thread &worker : workers) {
@@ -455,8 +466,7 @@ int main() {
         int r = std::min(255, std::max(0, static_cast<int>(avg_r * 255.0f)));
         int g = std::min(255, std::max(0, static_cast<int>(avg_g * 255.0f)));
         int b = std::min(255, std::max(0, static_cast<int>(avg_b * 255.0f)));
-        framebuffer[p_idx] = {static_cast<uint8_t>(r), static_cast<uint8_t>(g),
-                              static_cast<uint8_t>(b)};
+        framebuffer[p_idx] = {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
     }
 
     write_ppm_image("image.ppm", width, height, framebuffer);
