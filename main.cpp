@@ -99,20 +99,29 @@ inline float luminance(float r, float g, float b) {
     return 0.2126f * r + 0.7152f * g + 0.0722f * b;
 }
 
-int choose_tile_sample_count(float surface_ratio, float relative_variance) {
-    if (surface_ratio < 0.01f && relative_variance < 0.005f) {
-        return 2;
+int choose_tile_sample_count(float surface_ratio, float relative_variance, float mean_luma) {
+    // TIER 1: The Sky (Pure background, bail out instantly)
+    if (surface_ratio < 0.01f) {
+        return 1; 
     }
 
-    if (surface_ratio < 0.08f && relative_variance < 0.01f) {
-        return 8;
+    // Monte Carlo noise is worst here. Force max samples, ignore variance.
+    if (mean_luma < 0.02f) {
+        return 64; 
     }
 
-    if (relative_variance < 0.04f) {
-        return 32;
+    // TIER 2: Flat, well-lit Armor Plates (Smooth and bright)
+    if (relative_variance < 0.005f) {
+        return 4; 
     }
 
-    return 64;
+    // TIER 3: Moderate shadows and curved edges
+    if (relative_variance < 0.02f) {
+        return 16; 
+    }
+
+    // TIER 4: High noise in brightly lit areas
+    return 64; 
 }
 
 inline void samples_to_heatmap(int current_samples, int max_samples, uint8_t& out_r, uint8_t& out_g, uint8_t& out_b) {
@@ -179,7 +188,7 @@ AdaptiveSamplingSummary classify_adaptive_tiles(
                                   ? static_cast<float>(surface_hit_count) / static_cast<float>(sample_count)
                                   : 0.0f;
 
-        tile.target_samples = std::min(max_samples, choose_tile_sample_count(surface_ratio, relative_variance));
+        tile.target_samples = std::min(max_samples, choose_tile_sample_count(surface_ratio, relative_variance, mean_luma));
 
         int tile_pixels = (tile.x_end - tile.x_begin) * (tile.y_end - tile.y_begin);
         summary.total_pixel_samples += static_cast<uint64_t>(tile_pixels) * tile.target_samples;
@@ -532,8 +541,8 @@ int main() {
     const float RAY_EPSILON = 0.01f;
 
     // 3. SET UP DISPLAY
-    const int width = 1920;
-    const int height = 1080;
+    const int width = 3840;
+    const int height = 2160;
     const float aspect_ratio = (float)width / (float)height;
     std::vector<Pixel> framebuffer(width * height);
 
@@ -591,6 +600,7 @@ int main() {
 
     std::vector<RenderStats> worker_stats(thread_count);
     auto render_start = std::chrono::steady_clock::now();
+
 
     auto render_sample = [&](int sample, const std::vector<RenderTile> &work_tiles) {
         std::cout << "Rendering Sample " << sample + 1 << "/" << MAX_SAMPLES << "\r" << std::flush;
@@ -671,25 +681,41 @@ int main() {
     for (int sample = 48; sample < MAX_SAMPLES; ++sample) {
         render_sample(sample, tiles_after_48);
     }
+
     auto render_end = std::chrono::steady_clock::now();
 
     auto convert_start = std::chrono::steady_clock::now();
+
+    // TOGGLE THIS TRUE TO SEE CPU EFFORT, FALSE FOR FINAL RENDER
+    const bool RENDER_HEATMAP = false;
+
     for (int p_idx = 0; p_idx < width * height; ++p_idx) {
-        float inv_samples = sample_counts[p_idx] > 0
-                                ? 1.0f / static_cast<float>(sample_counts[p_idx])
-                                : 0.0f;
-        float avg_r = accum_r[p_idx] * inv_samples;
-        float avg_g = accum_g[p_idx] * inv_samples;
-        float avg_b = accum_b[p_idx] * inv_samples;
+        if (RENDER_HEATMAP) {
+            uint8_t hr, hg, hb;
+            // Grab the exact number of samples this specific pixel received
+            int current_samples = sample_counts[p_idx]; 
+            
+            // Convert to thermal gradient
+            samples_to_heatmap(current_samples, MAX_SAMPLES, hr, hg, hb);
+            framebuffer[p_idx] = {hr, hg, hb};
+        } else {
+            // Your original physically-based light conversion
+            float inv_samples = sample_counts[p_idx] > 0
+                                    ? 1.0f / static_cast<float>(sample_counts[p_idx])
+                                    : 0.0f;
+            float avg_r = accum_r[p_idx] * inv_samples;
+            float avg_g = accum_g[p_idx] * inv_samples;
+            float avg_b = accum_b[p_idx] * inv_samples;
 
-        avg_r = std::sqrt(avg_r);
-        avg_g = std::sqrt(avg_g);
-        avg_b = std::sqrt(avg_b);
+            avg_r = std::sqrt(avg_r);
+            avg_g = std::sqrt(avg_g);
+            avg_b = std::sqrt(avg_b);
 
-        int r = std::min(255, std::max(0, static_cast<int>(avg_r * 255.0f)));
-        int g = std::min(255, std::max(0, static_cast<int>(avg_g * 255.0f)));
-        int b = std::min(255, std::max(0, static_cast<int>(avg_b * 255.0f)));
-        framebuffer[p_idx] = {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
+            int r = std::min(255, std::max(0, static_cast<int>(avg_r * 255.0f)));
+            int g = std::min(255, std::max(0, static_cast<int>(avg_g * 255.0f)));
+            int b = std::min(255, std::max(0, static_cast<int>(avg_b * 255.0f)));
+            framebuffer[p_idx] = {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
+        }
     }
     auto convert_end = std::chrono::steady_clock::now();
 
