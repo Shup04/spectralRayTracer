@@ -1,5 +1,5 @@
 CXX = g++
-CXXFLAGS = -std=c++20 -O3 -Wall -Wextra -mavx2 -mfma -march=native
+CXXFLAGS = -std=c++20 -O3 -Wall -Wextra -mavx2 -mfma -march=native -pthread
 
 # We explicitly do NOT use -ffast-math to guarantee deterministic floating-point execution.
 
