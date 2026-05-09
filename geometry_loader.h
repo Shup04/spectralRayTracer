@@ -10,6 +10,76 @@
 
 //Helper for tracking which node we are filling
 uint32_t nodes_used = 1;
+constexpr int SAH_BIN_COUNT = 16;
+
+struct Bounds {
+    float min_x = 1e30f;
+    float min_y = 1e30f;
+    float min_z = 1e30f;
+    float max_x = -1e30f;
+    float max_y = -1e30f;
+    float max_z = -1e30f;
+
+    void grow(float x, float y, float z) {
+        min_x = std::min(min_x, x);
+        min_y = std::min(min_y, y);
+        min_z = std::min(min_z, z);
+        max_x = std::max(max_x, x);
+        max_y = std::max(max_y, y);
+        max_z = std::max(max_z, z);
+    }
+
+    void grow(const Bounds& other) {
+        grow(other.min_x, other.min_y, other.min_z);
+        grow(other.max_x, other.max_y, other.max_z);
+    }
+};
+
+inline Bounds triangle_bounds(const Triangle& tri) {
+    Bounds bounds;
+    bounds.grow(tri.v0_x, tri.v0_y, tri.v0_z);
+    bounds.grow(tri.v0_x + tri.e1_x, tri.v0_y + tri.e1_y, tri.v0_z + tri.e1_z);
+    bounds.grow(tri.v0_x + tri.e2_x, tri.v0_y + tri.e2_y, tri.v0_z + tri.e2_z);
+    return bounds;
+}
+
+inline float bounds_area(const Bounds& bounds) {
+    float ex = std::max(0.0f, bounds.max_x - bounds.min_x);
+    float ey = std::max(0.0f, bounds.max_y - bounds.min_y);
+    float ez = std::max(0.0f, bounds.max_z - bounds.min_z);
+    return 2.0f * (ex * ey + ey * ez + ez * ex);
+}
+
+inline float triangle_centroid_axis(const Triangle& tri, int axis) {
+    if (axis == 0) return tri.v0_x + (tri.e1_x + tri.e2_x) * (1.0f / 3.0f);
+    if (axis == 1) return tri.v0_y + (tri.e1_y + tri.e2_y) * (1.0f / 3.0f);
+    return tri.v0_z + (tri.e1_z + tri.e2_z) * (1.0f / 3.0f);
+}
+
+inline float bounds_min_axis(const Bounds& bounds, int axis) {
+    if (axis == 0) return bounds.min_x;
+    if (axis == 1) return bounds.min_y;
+    return bounds.min_z;
+}
+
+inline float bounds_extent_axis(const Bounds& bounds, int axis) {
+    if (axis == 0) return bounds.max_x - bounds.min_x;
+    if (axis == 1) return bounds.max_y - bounds.min_y;
+    return bounds.max_z - bounds.min_z;
+}
+
+struct SAHSplit {
+    int axis = -1;
+    int bin = -1;
+    float cost = 1e30f;
+};
+
+inline int centroid_bin(float centroid, float min_centroid, float extent) {
+    if (extent <= 0.0f) return 0;
+    float normalized = (centroid - min_centroid) / extent;
+    int bin = static_cast<int>(normalized * SAH_BIN_COUNT);
+    return std::clamp(bin, 0, SAH_BIN_COUNT - 1);
+}
 
 inline void translate_model(EngineState& engine, float tx, float ty, float tz) {
     for (uint32_t i = 0; i < engine.total_triangles; ++i) {
@@ -133,6 +203,97 @@ void update_node_bounds(uint32_t node_idx, EngineState& engine, uint32_t first, 
     }
 }
 
+SAHSplit find_sah_split(const EngineState& engine, uint32_t first, uint32_t count, const BVHNode& node) {
+    Bounds centroid_bounds;
+    for (uint32_t i = 0; i < count; ++i) {
+        const Triangle& tri = engine.triangles[first + i];
+        centroid_bounds.grow(
+            triangle_centroid_axis(tri, 0),
+            triangle_centroid_axis(tri, 1),
+            triangle_centroid_axis(tri, 2)
+        );
+    }
+
+    SAHSplit best;
+
+    for (int axis = 0; axis < 3; ++axis) {
+        float centroid_min = bounds_min_axis(centroid_bounds, axis);
+        float centroid_extent = bounds_extent_axis(centroid_bounds, axis);
+        if (centroid_extent <= 0.0f) {
+            continue;
+        }
+
+        Bounds bin_bounds[SAH_BIN_COUNT];
+        uint32_t bin_counts[SAH_BIN_COUNT] = {};
+
+        for (uint32_t i = 0; i < count; ++i) {
+            const Triangle& tri = engine.triangles[first + i];
+            float centroid = triangle_centroid_axis(tri, axis);
+            int bin = centroid_bin(centroid, centroid_min, centroid_extent);
+            bin_counts[bin]++;
+            bin_bounds[bin].grow(triangle_bounds(tri));
+        }
+
+        Bounds left_bounds[SAH_BIN_COUNT - 1];
+        Bounds right_bounds[SAH_BIN_COUNT - 1];
+        uint32_t left_counts[SAH_BIN_COUNT - 1] = {};
+        uint32_t right_counts[SAH_BIN_COUNT - 1] = {};
+
+        Bounds running_left;
+        uint32_t running_left_count = 0;
+        for (int split = 0; split < SAH_BIN_COUNT - 1; ++split) {
+            if (bin_counts[split] > 0) {
+                running_left.grow(bin_bounds[split]);
+            }
+            running_left_count += bin_counts[split];
+            left_bounds[split] = running_left;
+            left_counts[split] = running_left_count;
+        }
+
+        Bounds running_right;
+        uint32_t running_right_count = 0;
+        for (int split = SAH_BIN_COUNT - 2; split >= 0; --split) {
+            if (bin_counts[split + 1] > 0) {
+                running_right.grow(bin_bounds[split + 1]);
+            }
+            running_right_count += bin_counts[split + 1];
+            right_bounds[split] = running_right;
+            right_counts[split] = running_right_count;
+        }
+
+        for (int split = 0; split < SAH_BIN_COUNT - 1; ++split) {
+            if (left_counts[split] == 0 || right_counts[split] == 0) {
+                continue;
+            }
+
+            float cost =
+                bounds_area(left_bounds[split]) * left_counts[split] +
+                bounds_area(right_bounds[split]) * right_counts[split];
+
+            if (cost < best.cost) {
+                best.axis = axis;
+                best.bin = split;
+                best.cost = cost;
+            }
+        }
+    }
+
+    Bounds node_bounds;
+    node_bounds.min_x = node.min_x;
+    node_bounds.min_y = node.min_y;
+    node_bounds.min_z = node.min_z;
+    node_bounds.max_x = node.max_x;
+    node_bounds.max_y = node.max_y;
+    node_bounds.max_z = node.max_z;
+
+    float leaf_cost = bounds_area(node_bounds) * count;
+    if (best.axis < 0 || best.cost >= leaf_cost) {
+        best.axis = -1;
+    }
+
+    return best;
+}
+
 void subdivide(uint32_t node_idx, EngineState& engine, uint32_t first, uint32_t count) {
     BVHNode& node = engine.bvh_nodes[node_idx];
 
@@ -146,28 +307,35 @@ void subdivide(uint32_t node_idx, EngineState& engine, uint32_t first, uint32_t 
         return;
     }
 
-    // 3. Internal Node: We need to split
-    // Determine which axis to split on (choose the longest axis of the box)
-    float extent_x = node.max_x - node.min_x;
-    float extent_y = node.max_y - node.min_y;
-    float extent_z = node.max_z - node.min_z;
-    int axis = 0; // 0=x, 1=y, 2=z
-    if (extent_y > extent_x) axis = 1;
-    if (extent_z > (axis == 0 ? extent_x : extent_y)) axis = 2;
+    // 3. Internal Node: use binned SAH to choose where a split should happen.
+    SAHSplit split = find_sah_split(engine, first, count, node);
+    if (split.axis < 0) {
+        node.left_first = first;
+        node.triangle_count = count;
+        return;
+    }
 
-    float split_pos = (axis == 0) ? (node.min_x + extent_x * 0.5f) :
-                      (axis == 1) ? (node.min_y + extent_y * 0.5f) :
-                                    (node.min_z + extent_z * 0.5f);
+    Bounds centroid_bounds;
+    for (uint32_t tri_idx = 0; tri_idx < count; ++tri_idx) {
+        const Triangle& tri = engine.triangles[first + tri_idx];
+        centroid_bounds.grow(
+            triangle_centroid_axis(tri, 0),
+            triangle_centroid_axis(tri, 1),
+            triangle_centroid_axis(tri, 2)
+        );
+    }
 
-    // 4. Partition triangles around the split plane using their centroids
+    float centroid_min = bounds_min_axis(centroid_bounds, split.axis);
+    float centroid_extent = bounds_extent_axis(centroid_bounds, split.axis);
+
+    // 4. Partition triangles around the selected bin boundary.
     uint32_t i = first;
     uint32_t j = i + count - 1;
     while (i <= j) {
         const Triangle& tri = engine.triangles[i];
-        float centroid = (axis == 0) ? (tri.v0_x + (tri.e1_x + tri.e2_x) * 0.333f) :
-                         (axis == 1) ? (tri.v0_y + (tri.e1_y + tri.e2_y) * 0.333f) :
-                                       (tri.v0_z + (tri.e1_z + tri.e2_z) * 0.333f);
-        if (centroid < split_pos) {
+        float centroid = triangle_centroid_axis(tri, split.axis);
+        int bin = centroid_bin(centroid, centroid_min, centroid_extent);
+        if (bin <= split.bin) {
             i++;
         } else {
             std::swap(engine.triangles[i], engine.triangles[j]);

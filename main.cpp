@@ -71,6 +71,22 @@ struct RenderSettings {
     float ray_epsilon;
 };
 
+struct RenderTile {
+    int x_begin;
+    int y_begin;
+    int x_end;
+    int y_end;
+    int target_samples;
+};
+
+struct AdaptiveSamplingSummary {
+    uint64_t total_pixel_samples = 0;
+    int tiles_4 = 0;
+    int tiles_16 = 0;
+    int tiles_48 = 0;
+    int tiles_128 = 0;
+};
+
 inline uint32_t make_packet_seed(int sample, int y, int x) {
     uint32_t seed = 2166136261u;
     seed ^= static_cast<uint32_t>(sample + 1) * 16777619u;
@@ -79,29 +95,137 @@ inline uint32_t make_packet_seed(int sample, int y, int x) {
     return seed;
 }
 
+inline float luminance(float r, float g, float b) {
+    return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+
+int choose_tile_sample_count(float surface_ratio, float relative_variance) {
+    if (surface_ratio < 0.01f && relative_variance < 0.005f) {
+        return 2;
+    }
+
+    if (surface_ratio < 0.08f && relative_variance < 0.01f) {
+        return 8;
+    }
+
+    if (relative_variance < 0.04f) {
+        return 32;
+    }
+
+    return 64;
+}
+
+inline void samples_to_heatmap(int current_samples, int max_samples, uint8_t& out_r, uint8_t& out_g, uint8_t& out_b) {
+    // Normalize to a 0.0 - 1.0 range
+    float t = std::min(1.0f, (float)current_samples / (float)max_samples);
+    
+    // Thermal Gradient Math (Blue -> Cyan -> Green -> Yellow -> Red)
+    float r = std::max(0.0f, std::min(1.0f, 3.0f * t - 1.0f));
+    float g = std::max(0.0f, std::min(1.0f, 1.5f - std::abs(3.0f * t - 1.5f)));
+    float b = std::max(0.0f, std::min(1.0f, 1.0f - 3.0f * t));
+
+    out_r = (uint8_t)(r * 255.0f);
+    out_g = (uint8_t)(g * 255.0f);
+    out_b = (uint8_t)(b * 255.0f);
+}
+
+AdaptiveSamplingSummary classify_adaptive_tiles(
+    std::vector<RenderTile> &tiles,
+    const RenderSettings &settings,
+    const std::vector<float> &accum_r,
+    const std::vector<float> &accum_g,
+    const std::vector<float> &accum_b,
+    const std::vector<uint16_t> &sample_counts,
+    const std::vector<uint16_t> &primary_surface_hits,
+    int max_samples) {
+    AdaptiveSamplingSummary summary;
+
+    for (RenderTile &tile : tiles) {
+        int pixel_count = 0;
+        uint64_t sample_count = 0;
+        uint64_t surface_hit_count = 0;
+        float mean_luma = 0.0f;
+        float mean_luma_sq = 0.0f;
+
+        for (int y = tile.y_begin; y < tile.y_end; ++y) {
+            for (int x = tile.x_begin; x < tile.x_end; ++x) {
+                int p_idx = y * settings.width + x;
+                int pixel_samples = sample_counts[p_idx];
+                if (pixel_samples == 0) {
+                    continue;
+                }
+
+                float inv_samples = 1.0f / static_cast<float>(pixel_samples);
+                float luma = luminance(
+                    accum_r[p_idx] * inv_samples,
+                    accum_g[p_idx] * inv_samples,
+                    accum_b[p_idx] * inv_samples);
+
+                mean_luma += luma;
+                mean_luma_sq += luma * luma;
+                sample_count += static_cast<uint64_t>(pixel_samples);
+                surface_hit_count += primary_surface_hits[p_idx];
+                pixel_count++;
+            }
+        }
+
+        float inv_pixels = pixel_count > 0 ? 1.0f / static_cast<float>(pixel_count) : 0.0f;
+        mean_luma *= inv_pixels;
+        mean_luma_sq *= inv_pixels;
+
+        float variance = std::max(0.0f, mean_luma_sq - mean_luma * mean_luma);
+        float relative_variance = variance / (mean_luma * mean_luma + 0.0001f);
+        float surface_ratio = sample_count > 0
+                                  ? static_cast<float>(surface_hit_count) / static_cast<float>(sample_count)
+                                  : 0.0f;
+
+        tile.target_samples = std::min(max_samples, choose_tile_sample_count(surface_ratio, relative_variance));
+
+        int tile_pixels = (tile.x_end - tile.x_begin) * (tile.y_end - tile.y_begin);
+        summary.total_pixel_samples += static_cast<uint64_t>(tile_pixels) * tile.target_samples;
+
+        if (tile.target_samples <= 4) {
+            summary.tiles_4++;
+        } else if (tile.target_samples <= 16) {
+            summary.tiles_16++;
+        } else if (tile.target_samples <= 48) {
+            summary.tiles_48++;
+        } else {
+            summary.tiles_128++;
+        }
+    }
+
+    return summary;
+}
+
 PROFILE_HOT void render_sample_tiles(
     const EngineState &engine,
     const RenderSettings &settings,
+    const std::vector<RenderTile> &tiles,
     int sample,
-    int tile_rows,
-    std::atomic<int> &next_row,
+    std::atomic<int> &next_tile,
     std::vector<float> &accum_r,
     std::vector<float> &accum_g,
     std::vector<float> &accum_b,
+    std::vector<uint16_t> &sample_counts,
+    std::vector<uint16_t> &primary_surface_hits,
     RenderStats &stats) {
     RayPacket packet;
     SIMDRand rng;
 
     while (true) {
-        int y_begin = next_row.fetch_add(tile_rows, std::memory_order_relaxed);
-        if (y_begin >= settings.height) {
+        int tile_idx = next_tile.fetch_add(1, std::memory_order_relaxed);
+        if (tile_idx >= static_cast<int>(tiles.size())) {
             break;
         }
 
-        int y_end = std::min(settings.height, y_begin + tile_rows);
+        const RenderTile &tile = tiles[tile_idx];
+        if (sample >= tile.target_samples) {
+            continue;
+        }
 
-        for (int y = y_begin; y < y_end; ++y) {
-            for (int x = 0; x < settings.width; x += 8) {
+        for (int y = tile.y_begin; y < tile.y_end; ++y) {
+            for (int x = tile.x_begin; x < tile.x_end; x += 8) {
                 rng.init(make_packet_seed(sample, y, x));
                 stats.primary_packets++;
 
@@ -112,7 +236,7 @@ PROFILE_HOT void render_sample_tiles(
 
                 for (int lane = 0; lane < 8; ++lane) {
                     int pixel_x = x + lane;
-                    bool valid_pixel = pixel_x < settings.width;
+                    bool valid_pixel = pixel_x < tile.x_end;
                     active[lane] = valid_pixel;
                     if (valid_pixel) {
                         stats.primary_rays++;
@@ -211,6 +335,11 @@ PROFILE_HOT void render_sample_tiles(
                             active[i] = false;
                         } else {
                             stats.surface_hits++;
+                            if (bounce == 0) {
+                                int p_idx = y * settings.width + x + i;
+                                primary_surface_hits[p_idx]++;
+                            }
+
                             float old_dx = packet.dir_x[i];
                             float old_dy = packet.dir_y[i];
                             float old_dz = packet.dir_z[i];
@@ -343,12 +472,13 @@ PROFILE_HOT void render_sample_tiles(
                 }
 
                 int pixel_base = y * settings.width + x;
-                for (int i = 0; i < 8 && x + i < settings.width; ++i) {
+                for (int i = 0; i < 8 && x + i < tile.x_end; ++i) {
                     int p_idx = pixel_base + i;
 
                     accum_r[p_idx] += pixel_r[i];
                     accum_g[p_idx] += pixel_g[i];
                     accum_b[p_idx] += pixel_b[i];
+                    sample_counts[p_idx]++;
                 }
             }
         }
@@ -366,7 +496,10 @@ int main() {
     rotate_model_x(engine, -90.0f);
 
     rotate_model_y(engine, 0.0f);
+    auto bvh_build_start = std::chrono::steady_clock::now();
     build_bvh(engine);
+    auto bvh_build_end = std::chrono::steady_clock::now();
+    double bvh_build_ms = std::chrono::duration<double, std::milli>(bvh_build_end - bvh_build_start).count();
 
     // 2. MANUALLY ALLOCATE ONLY THE MATERIALS
     engine.total_materials = 1;
@@ -399,8 +532,8 @@ int main() {
     const float RAY_EPSILON = 0.01f;
 
     // 3. SET UP DISPLAY
-    const int width = 2560;
-    const int height = 1440;
+    const int width = 1920;
+    const int height = 1080;
     const float aspect_ratio = (float)width / (float)height;
     std::vector<Pixel> framebuffer(width * height);
 
@@ -408,7 +541,24 @@ int main() {
     std::vector<float> accum_r(width * height, 0.0f);
     std::vector<float> accum_g(width * height, 0.0f);
     std::vector<float> accum_b(width * height, 0.0f);
+    std::vector<uint16_t> sample_counts(width * height, 0);
+    std::vector<uint16_t> primary_surface_hits(width * height, 0);
     const int MAX_SAMPLES = 128;
+    const int PILOT_SAMPLES = 4;
+    const int tile_width = 16;
+    const int tile_height = 8;
+
+    std::vector<RenderTile> tiles;
+    for (int y = 0; y < height; y += tile_height) {
+        for (int x = 0; x < width; x += tile_width) {
+            tiles.push_back({
+                x,
+                y,
+                std::min(width, x + tile_width),
+                std::min(height, y + tile_height),
+                MAX_SAMPLES});
+        }
+    }
 
     std::cout << "Firing rays at " << engine.total_triangles << " triangles...\n";
 
@@ -439,42 +589,98 @@ int main() {
 
     std::cout << "Rendering with " << thread_count << " worker threads.\n";
 
-    const int tile_rows = 8;
     std::vector<RenderStats> worker_stats(thread_count);
     auto render_start = std::chrono::steady_clock::now();
 
-    for (int sample = 0; sample < MAX_SAMPLES; ++sample) {
+    auto render_sample = [&](int sample, const std::vector<RenderTile> &work_tiles) {
         std::cout << "Rendering Sample " << sample + 1 << "/" << MAX_SAMPLES << "\r" << std::flush;
 
         std::vector<std::thread> workers;
         workers.reserve(thread_count);
-        std::atomic<int> next_row{0};
+        std::atomic<int> next_tile{0};
 
         for (unsigned int thread_idx = 0; thread_idx < thread_count; ++thread_idx) {
             workers.emplace_back(
                 render_sample_tiles,
                 std::cref(engine),
                 std::cref(settings),
+                std::cref(work_tiles),
                 sample,
-                tile_rows,
-                std::ref(next_row),
+                std::ref(next_tile),
                 std::ref(accum_r),
                 std::ref(accum_g),
                 std::ref(accum_b),
+                std::ref(sample_counts),
+                std::ref(primary_surface_hits),
                 std::ref(worker_stats[thread_idx]));
         }
 
         for (std::thread &worker : workers) {
             worker.join();
         }
+    };
+
+    for (int sample = 0; sample < PILOT_SAMPLES; ++sample) {
+        render_sample(sample, tiles);
+    }
+
+    AdaptiveSamplingSummary adaptive_summary = classify_adaptive_tiles(
+        tiles,
+        settings,
+        accum_r,
+        accum_g,
+        accum_b,
+        sample_counts,
+        primary_surface_hits,
+        MAX_SAMPLES);
+
+    uint64_t full_pixel_samples = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * MAX_SAMPLES;
+    double sample_fraction = static_cast<double>(adaptive_summary.total_pixel_samples) / static_cast<double>(full_pixel_samples);
+    std::cout << "\nAdaptive sampling\n";
+    std::cout << "  tiles at 4 spp: " << adaptive_summary.tiles_4 << "\n";
+    std::cout << "  tiles at 16 spp: " << adaptive_summary.tiles_16 << "\n";
+    std::cout << "  tiles at 48 spp: " << adaptive_summary.tiles_48 << "\n";
+    std::cout << "  tiles at 128 spp: " << adaptive_summary.tiles_128 << "\n";
+    std::cout << "  scheduled samples: " << sample_fraction * 100.0 << "% of full render\n";
+
+    std::vector<RenderTile> tiles_after_4;
+    std::vector<RenderTile> tiles_after_16;
+    std::vector<RenderTile> tiles_after_48;
+    tiles_after_4.reserve(tiles.size());
+    tiles_after_16.reserve(tiles.size());
+    tiles_after_48.reserve(tiles.size());
+
+    for (const RenderTile &tile : tiles) {
+        if (tile.target_samples > 4) {
+            tiles_after_4.push_back(tile);
+        }
+        if (tile.target_samples > 16) {
+            tiles_after_16.push_back(tile);
+        }
+        if (tile.target_samples > 48) {
+            tiles_after_48.push_back(tile);
+        }
+    }
+
+    for (int sample = PILOT_SAMPLES; sample < std::min(16, MAX_SAMPLES); ++sample) {
+        render_sample(sample, tiles_after_4);
+    }
+    for (int sample = 16; sample < std::min(48, MAX_SAMPLES); ++sample) {
+        render_sample(sample, tiles_after_16);
+    }
+    for (int sample = 48; sample < MAX_SAMPLES; ++sample) {
+        render_sample(sample, tiles_after_48);
     }
     auto render_end = std::chrono::steady_clock::now();
 
     auto convert_start = std::chrono::steady_clock::now();
     for (int p_idx = 0; p_idx < width * height; ++p_idx) {
-        float avg_r = accum_r[p_idx] / MAX_SAMPLES;
-        float avg_g = accum_g[p_idx] / MAX_SAMPLES;
-        float avg_b = accum_b[p_idx] / MAX_SAMPLES;
+        float inv_samples = sample_counts[p_idx] > 0
+                                ? 1.0f / static_cast<float>(sample_counts[p_idx])
+                                : 0.0f;
+        float avg_r = accum_r[p_idx] * inv_samples;
+        float avg_g = accum_g[p_idx] * inv_samples;
+        float avg_b = accum_b[p_idx] * inv_samples;
 
         avg_r = std::sqrt(avg_r);
         avg_g = std::sqrt(avg_g);
@@ -512,6 +718,7 @@ int main() {
                                    : 0.0;
 
     std::cout << "\nRender profile\n";
+    std::cout << "  BVH build: " << bvh_build_ms << " ms\n";
     std::cout << "  render only: " << render_ms << " ms\n";
     std::cout << "  final conversion: " << convert_ms << " ms\n";
     std::cout << "  primary rays: " << stats.primary_rays << "\n";
