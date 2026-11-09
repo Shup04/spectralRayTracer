@@ -31,6 +31,24 @@ RayPacket rays() {
 }
 
 int main() {
+    for (uint32_t offset : {1u, 7u, 13u, 19u, 23u, 29u, 31u, 37u}) {
+        SIMDRand rng, repeat;
+        rng.init(0u - offset);
+        repeat.init(0u - offset);
+        alignas(32) uint32_t states[8];
+        simd_store_int(states, rng.state);
+        for (uint32_t state : states) check(state != 0, "wrapped packet seeds must not trap xorshift at zero");
+        float first = rng.next_float_scalar();
+        check(first == repeat.next_float_scalar(), "same wrapped seed reproduces first value");
+        bool changed = false;
+        for (int i = 0; i < 32; ++i) {
+            float value = rng.next_float_scalar();
+            check(value == repeat.next_float_scalar(), "same wrapped seed reproduces sequence");
+            check(std::isfinite(value) && value >= 0 && value <= 1, "random value range");
+            changed = changed || value != first;
+        }
+        check(changed, "scalar random sequence must advance");
+    }
     Scene scene;
     auto &engine = scene.engine;
     engine.total_triangles = 8;
@@ -51,6 +69,25 @@ int main() {
     }
     build_bvh(engine);
     check(nodes_used > 1, "synthetic geometry must exercise internal nodes");
+    // Use a single flat leaf to exercise its exact maximum faces, not just
+    // the larger parent bounds. Mix both signed zeros with outside/inactive rays.
+    {
+        BVHNode leaf{};
+        leaf.min_x = leaf.min_y = leaf.min_z = leaf.max_z = 0;
+        leaf.max_x = leaf.max_y = 1;
+        RayPacket edge = rays();
+        const float xs[8] = {1, 0, 0.5f, 1.01f, -0.01f, 0.5f, 1, 0.25f};
+        const float ys[8] = {0, 1, 0.5f, 0, 0, 1.01f, 0, 0.25f};
+        for (int i = 0; i < 8; ++i) {
+            edge.origin_x[i] = xs[i]; edge.origin_y[i] = ys[i]; edge.origin_z[i] = 2;
+            edge.dir_x[i] = (i % 2) ? -0.0f : 0.0f; edge.dir_y[i] = 0; edge.dir_z[i] = -1;
+            edge.inv_dir_x[i] = edge.inv_dir_y[i] = 1e8f; edge.inv_dir_z[i] = -1;
+            edge.closest_t[i] = 1e30f;
+        }
+        edge.closest_t[7] = 0.5f;
+        check(simd_movemask(intersect_bvh_node(edge, leaf, simd_mask_from_bits(0xbf))) == 7,
+              "parallel slabs include maximum-face hits and reject outside/inactive/occluded lanes");
+    }
     RayPacket traversed = rays();
     traverse_bvh(traversed, engine, simd_mask_from_bits(0xdf));
     for (int i = 0; i < 8; ++i) {
@@ -84,5 +121,5 @@ int main() {
     try { display_channel(std::numeric_limits<float>::quiet_NaN()); }
     catch (const std::runtime_error &) { rejected = true; }
     check(rejected, "non-finite display input rejection");
-    std::cout << "PASS: triangle mixed hit/miss/inactive/parallel/edge/backface lanes, planar multi-leaf BVH, 256 brute-force comparisons, display conversion\n";
+    std::cout << "PASS: wrapped RNG seeds, triangle mixed lanes, parallel slab boundaries, planar multi-leaf BVH, 256 brute-force comparisons, display conversion\n";
 }

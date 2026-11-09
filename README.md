@@ -66,10 +66,14 @@ make test
 
 This builds and runs the actual AVX2 implementation, with:
 
+- Wrapped packet seeds avoid the all-zero xorshift state and reproduce finite,
+  advancing scalar sequences across all eight lane offsets.
 - Synthetic triangle intersections: hits, misses, inactive lanes, parallel rays,
   closer prior hits, vertex hits and back faces; untouched hit records stay intact.
 - A planar multi-leaf BVH compared with direct intersection, plus 256 deterministic
   ray lanes compared with brute-force traversal under a mixed active mask.
+  Exact parallel rays on maximum slab faces remain hits, while outside, inactive
+  and already-occluded lanes remain misses.
 - Display lower/upper clamping, gamma conversion and non-finite input rejection.
 - Real synthetic STL renders at 35×19 and budgets 1, 2, 4, 5, 17 and 65; dimensions,
   channel count/range, finite accumulation, budget bounds and byte-identical reruns.
