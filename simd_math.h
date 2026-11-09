@@ -10,12 +10,14 @@ struct SIMDRand {
 
     // Initialize with 8 distinct, non-zero seeds
     inline void init(uint32_t base_seed) {
-        // We add prime numbers to ensure no lane gets the exact same starting seed,
-        // and to guarantee no lane ever accidentally starts with exactly 0.
+        // Distinct offsets decorrelate the lanes. Unsigned addition can wrap to
+        // zero, which is an absorbing state for xorshift, so remap it to one.
         state = _mm256_set_epi32(
             base_seed + 1, base_seed + 7, base_seed + 13, base_seed + 19,
             base_seed + 23, base_seed + 29, base_seed + 31, base_seed + 37
         );
+        __m256i zero_lanes = _mm256_cmpeq_epi32(state, _mm256_setzero_si256());
+        state = _mm256_or_si256(state, _mm256_and_si256(zero_lanes, _mm256_set1_epi32(1)));
     }
 
     // Xorshift32: Very fast, perfectly suited for SIMD

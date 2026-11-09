@@ -1,20 +1,30 @@
 CXX = g++
-#CXXFLAGS = -std=c++20 -O3 -Wall -Wextra -mavx2 -mfma -march=native -pthread
-CXXFLAGS = -std=c++20 -O3 -g -fno-omit-frame-pointer -Wall -Wextra -mavx2 -mfma -march=native -pthread
-# Add -DPROFILE_SYMBOLS while using perf if inlined hot functions collapse into render_sample_tiles.
-# We explicitly do NOT use -ffast-math to guarantee deterministic floating-point execution.
-
-SRC = main.cpp
-OBJ = $(SRC:.cpp=.o)
+CPPFLAGS ?=
+# AVX2/FMA are required. Avoid fast-math; no host-specific march is needed.
+CXXFLAGS ?= -std=c++20 -O3 -g -fno-omit-frame-pointer -Wall -Wextra -mavx2 -mfma -pthread
+LDFLAGS ?=
+LDLIBS ?=
 EXEC = spectral_tracer
+OBJ = main.o tests/geometry_test.o
+DEP = $(OBJ:.o=.d)
 
+.PHONY: all clean test
 all: $(EXEC)
 
-$(EXEC): $(OBJ)
-	$(CXX) $(CXXFLAGS) -o $@ $^
+$(EXEC): main.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/geometry_test: tests/geometry_test.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+test: $(EXEC) tests/geometry_test
+	./tests/geometry_test
+	python3 tests/smoke.py
 
 clean:
-	rm -f $(OBJ) $(EXEC)
+	rm -f $(OBJ) $(DEP) $(EXEC) tests/geometry_test
+
+-include $(DEP)

@@ -1,4 +1,5 @@
 #pragma once
+#include <limits>
 #include "core_types.h"
 #include "simd_math.h"
 
@@ -61,12 +62,30 @@ PROFILE_HOT __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& no
   __m256 t_near_z = simd_min(t1_z, t2_z);
   __m256 t_far_z  = simd_max(t1_z, t2_z);
 
+  // A truly parallel ray stays inside an inclusive slab, even on its maximum
+  // face. A large finite reciprocal alone incorrectly makes that face end at t=0.
+  auto parallel_slab = [&alive_mask](__m256 direction, __m256 origin,
+                                    __m256 lower, __m256 upper,
+                                    __m256 &near_t, __m256 &far_t) {
+    __m256 parallel = _mm256_cmp_ps(direction, simd_zero(), _CMP_EQ_OQ);
+    __m256 inside = simd_and(simd_cmp_greater_equal(origin, lower),
+                             simd_cmp_less_equal(origin, upper));
+    __m256 moving = _mm256_cmp_ps(direction, simd_zero(), _CMP_NEQ_OQ);
+    alive_mask = simd_and(alive_mask, simd_or(moving, inside));
+    near_t = simd_blend(near_t, simd_set1(-std::numeric_limits<float>::infinity()), parallel);
+    far_t = simd_blend(far_t, simd_set1(std::numeric_limits<float>::infinity()), parallel);
+  };
+  parallel_slab(simd_load(packet.dir_x), origin_x, box_min_x, box_max_x, t_near_x, t_far_x);
+  parallel_slab(simd_load(packet.dir_y), origin_y, box_min_y, box_max_y, t_near_y, t_far_y);
+  parallel_slab(simd_load(packet.dir_z), origin_z, box_min_z, box_max_z, t_near_z, t_far_z);
+
   __m256 t_near = simd_max(t_near_x, simd_max(t_near_y, t_near_z));
   __m256 t_far = simd_min(t_far_x, simd_min(t_far_y, t_far_z));
   __m256 closest_t = simd_load(packet.closest_t);
 
   // Do not let dead lanes keep the BVH traversal alive.
-  __m256 hit_mask = simd_cmp_greater(t_far, t_near);
+  // Inclusive slabs retain flat triangle bounds and rays on box edges.
+  __m256 hit_mask = simd_cmp_greater_equal(t_far, t_near);
   __m256 front_mask = simd_cmp_greater(t_far, simd_set1(0.001f));
 
   // If the box starts beyond the closest triangle already found,
