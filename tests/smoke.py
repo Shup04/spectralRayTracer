@@ -66,6 +66,13 @@ def main():
                      ('--samples', '0'), ('--samples', 'abc'), ('--mesh',),
                      ('--output', ''), ('--surprise',), ('--width', '8192', '--height', '8192')]:
             invoke(*args, success=False)
+        for option in ('--output', '--mesh'):
+            result = subprocess.run(
+                [str(ROOT / 'spectral_tracer'), '--mesh', str(mesh), '--width', '1',
+                 '--height', '1', '--samples', '1', option, '--heatmap'],
+                cwd=directory, capture_output=True, text=True, timeout=60)
+            assert result.returncode != 0 and f'Missing value for {option}' in result.stderr
+            assert not (directory / '--heatmap').exists()
         invoke('--mesh', directory / 'missing.stl', success=False)
         for name, content in [('empty', b''), ('zero', b'0' * 80 + struct.pack('<I', 0)),
                               ('truncated', mesh.read_bytes()[:-1]),
@@ -76,7 +83,7 @@ def main():
             invoke('--mesh', broken, success=False)
         invoke('--mesh', mesh, '--width', 1, '--height', 1, '--samples', 1,
                '--output', directory, success=False)
-        print('PASS: synthetic 35x19 renders at 1/2/4/5/17/65 spp budgets; repeat bytes; heatmap; 1x1; 19 invalid-input cases')
+        print('PASS: synthetic 35x19 renders at 1/2/4/5/17/65 spp budgets; repeat bytes; heatmap; 1x1; 21 invalid-input cases')
         print('65-budget RGB SHA256:', hashlib.sha256(output.read_bytes()).hexdigest())
 
 

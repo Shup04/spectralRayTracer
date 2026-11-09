@@ -526,7 +526,7 @@ Options parse_options(int argc, char **argv) {
         if (arg != "--mesh" && arg != "--output" && arg != "--width" && arg != "--height" && arg != "--samples") {
             throw std::invalid_argument("Unknown option: " + arg);
         }
-        if (++i == argc || std::string_view(argv[i]).empty()) {
+        if (++i == argc || std::string_view(argv[i]).empty() || std::string_view(argv[i]).starts_with("--")) {
             throw std::invalid_argument("Missing value for " + arg);
         }
         if (arg == "--mesh") options.mesh = argv[i];

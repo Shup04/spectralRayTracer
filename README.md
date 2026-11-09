@@ -32,7 +32,8 @@ make -j2
 
 Run from the repository root or supply your own mesh path. Outputs are text PPM
 (P3 RGB, 0–255); use any PPM-capable image viewer. Output parent directories are
-created automatically. Build outputs and `output/` are ignored; checked-in binary
+created automatically. For a path beginning with `--`, use an explicit `./` prefix.
+Build outputs and `output/` are ignored; checked-in binary
 and profiling artifacts have been removed so builds use source.
 
 | Option | Default | Contract |
@@ -72,7 +73,7 @@ This builds and runs the actual AVX2 implementation, with:
 - Display lower/upper clamping, gamma conversion and non-finite input rejection.
 - Real synthetic STL renders at 35×19 and budgets 1, 2, 4, 5, 17 and 65; dimensions,
   channel count/range, finite accumulation, budget bounds and byte-identical reruns.
-- A heatmap and a 1×1 render; 19 malformed-option, invalid-mesh or output-failure cases.
+- A heatmap and a 1×1 render; 21 malformed-option, invalid-mesh or output-failure cases.
 
 The smoke script uses a temporary directory and removes its outputs. To retain
 synthetic examples without editing source:
