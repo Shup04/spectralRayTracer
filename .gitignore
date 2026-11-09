@@ -1,0 +1,7 @@
+*.o
+*.d
+/spectral_tracer
+/tests/geometry_test
+/output/
+/perf*.data*
+__pycache__/

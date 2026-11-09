@@ -66,7 +66,8 @@ PROFILE_HOT __m256 intersect_bvh_node(const RayPacket& packet, const BVHNode& no
   __m256 closest_t = simd_load(packet.closest_t);
 
   // Do not let dead lanes keep the BVH traversal alive.
-  __m256 hit_mask = simd_cmp_greater(t_far, t_near);
+  // Inclusive slabs retain flat triangle bounds and rays on box edges.
+  __m256 hit_mask = simd_cmp_greater_equal(t_far, t_near);
   __m256 front_mask = simd_cmp_greater(t_far, simd_set1(0.001f));
 
   // If the box starts beyond the closest triangle already found,

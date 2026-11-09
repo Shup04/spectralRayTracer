@@ -3,6 +3,10 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <charconv>
+#include <filesystem>
+#include <stdexcept>
+#include <string_view>
 #include <immintrin.h>
 #include <iostream>
 #include <thread>
@@ -83,8 +87,7 @@ struct AdaptiveSamplingSummary {
     uint64_t total_pixel_samples = 0;
     int tiles_4 = 0;
     int tiles_16 = 0;
-    int tiles_48 = 0;
-    int tiles_128 = 0;
+    int tiles_64 = 0;
 };
 
 inline uint32_t make_packet_seed(int sample, int y, int x) {
@@ -188,7 +191,9 @@ AdaptiveSamplingSummary classify_adaptive_tiles(
                                   ? static_cast<float>(surface_hit_count) / static_cast<float>(sample_count)
                                   : 0.0f;
 
-        tile.target_samples = std::min(max_samples, choose_tile_sample_count(surface_ratio, relative_variance, mean_luma));
+        tile.target_samples = std::clamp(
+            choose_tile_sample_count(surface_ratio, relative_variance, mean_luma),
+            std::min(4, max_samples), max_samples);
 
         int tile_pixels = (tile.x_end - tile.x_begin) * (tile.y_end - tile.y_begin);
         summary.total_pixel_samples += static_cast<uint64_t>(tile_pixels) * tile.target_samples;
@@ -197,10 +202,8 @@ AdaptiveSamplingSummary classify_adaptive_tiles(
             summary.tiles_4++;
         } else if (tile.target_samples <= 16) {
             summary.tiles_16++;
-        } else if (tile.target_samples <= 48) {
-            summary.tiles_48++;
         } else {
-            summary.tiles_128++;
+            summary.tiles_64++;
         }
     }
 
@@ -219,7 +222,7 @@ PROFILE_HOT void render_sample_tiles(
     std::vector<uint16_t> &sample_counts,
     std::vector<uint16_t> &primary_surface_hits,
     RenderStats &stats) {
-    RayPacket packet;
+    RayPacket packet{};
     SIMDRand rng;
 
     while (true) {
@@ -494,13 +497,67 @@ PROFILE_HOT void render_sample_tiles(
     }
 }
 
-int main() {
-    std::cout << "Booting Wube-Tier Spectral Raytracer...\n";
+struct Options {
+    std::string mesh = "orc.stl";
+    std::string output = "output/image.ppm";
+    int width = 640;
+    int height = 360;
+    int samples = 64;
+    bool heatmap = false;
+};
 
-    EngineState engine;
+int parse_positive_int(std::string_view value, int maximum, const std::string &name) {
+    int result = 0;
+    auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (error != std::errc{} || end != value.data() + value.size() || result < 1 || result > maximum) {
+        throw std::invalid_argument(name + " must be an integer in [1, " + std::to_string(maximum) + "]");
+    }
+    return result;
+}
+
+Options parse_options(int argc, char **argv) {
+    Options options;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--heatmap") {
+            options.heatmap = true;
+            continue;
+        }
+        if (arg != "--mesh" && arg != "--output" && arg != "--width" && arg != "--height" && arg != "--samples") {
+            throw std::invalid_argument("Unknown option: " + arg);
+        }
+        if (++i == argc || std::string_view(argv[i]).empty()) {
+            throw std::invalid_argument("Missing value for " + arg);
+        }
+        if (arg == "--mesh") options.mesh = argv[i];
+        if (arg == "--output") options.output = argv[i];
+        if (arg == "--width") options.width = parse_positive_int(argv[i], 8192, arg);
+        if (arg == "--height") options.height = parse_positive_int(argv[i], 8192, arg);
+        if (arg == "--samples") options.samples = parse_positive_int(argv[i], 65535, arg);
+    }
+    if (static_cast<uint64_t>(options.width) * options.height > 16777216) {
+        throw std::invalid_argument("Resolution must not exceed 16777216 pixels");
+    }
+    return options;
+}
+
+// Own aligned arenas even when loading, rendering or output throws.
+struct Scene {
+    EngineState engine{};
+    ~Scene() {
+        _mm_free(engine.materials);
+        _mm_free(engine.bvh_nodes);
+        _mm_free(engine.triangles);
+    }
+};
+
+int run(const Options &options) {
+    std::cout << "Adaptive RGB CPU raytracer (AVX2/FMA)\n";
+    Scene scene;
+    EngineState &engine = scene.engine;
 
     // 1. LOAD AND BUILD (These handle their own mallocs)
-    if (!load_binary_stl("orc.stl", engine))
+    if (!load_binary_stl(options.mesh, engine))
         return -1;
     rotate_model_x(engine, -90.0f);
 
@@ -541,8 +598,8 @@ int main() {
     const float RAY_EPSILON = 0.01f;
 
     // 3. SET UP DISPLAY
-    const int width = 3840;
-    const int height = 2160;
+    const int width = options.width;
+    const int height = options.height;
     const float aspect_ratio = (float)width / (float)height;
     std::vector<Pixel> framebuffer(width * height);
 
@@ -552,8 +609,8 @@ int main() {
     std::vector<float> accum_b(width * height, 0.0f);
     std::vector<uint16_t> sample_counts(width * height, 0);
     std::vector<uint16_t> primary_surface_hits(width * height, 0);
-    const int MAX_SAMPLES = 128;
-    const int PILOT_SAMPLES = 4;
+    const int MAX_SAMPLES = options.samples;
+    const int PILOT_SAMPLES = std::min(4, MAX_SAMPLES);
     const int tile_width = 16;
     const int tile_height = 8;
 
@@ -647,49 +704,31 @@ int main() {
     uint64_t full_pixel_samples = static_cast<uint64_t>(width) * static_cast<uint64_t>(height) * MAX_SAMPLES;
     double sample_fraction = static_cast<double>(adaptive_summary.total_pixel_samples) / static_cast<double>(full_pixel_samples);
     std::cout << "\nAdaptive sampling\n";
-    std::cout << "  tiles at 4 spp: " << adaptive_summary.tiles_4 << "\n";
-    std::cout << "  tiles at 16 spp: " << adaptive_summary.tiles_16 << "\n";
-    std::cout << "  tiles at 48 spp: " << adaptive_summary.tiles_48 << "\n";
-    std::cout << "  tiles at 128 spp: " << adaptive_summary.tiles_128 << "\n";
-    std::cout << "  scheduled samples: " << sample_fraction * 100.0 << "% of full render\n";
+    std::cout << "  tiles at <=4 spp: " << adaptive_summary.tiles_4 << "\n";
+    std::cout << "  tiles at 5-16 spp: " << adaptive_summary.tiles_16 << "\n";
+    std::cout << "  tiles at 17-64 spp: " << adaptive_summary.tiles_64 << "\n";
+    std::cout << "  scheduled samples: " << sample_fraction * 100.0 << "% of budget\n";
 
-    std::vector<RenderTile> tiles_after_4;
-    std::vector<RenderTile> tiles_after_16;
-    std::vector<RenderTile> tiles_after_48;
-    tiles_after_4.reserve(tiles.size());
-    tiles_after_16.reserve(tiles.size());
-    tiles_after_48.reserve(tiles.size());
-
-    for (const RenderTile &tile : tiles) {
-        if (tile.target_samples > 4) {
-            tiles_after_4.push_back(tile);
-        }
-        if (tile.target_samples > 16) {
-            tiles_after_16.push_back(tile);
-        }
-        if (tile.target_samples > 48) {
-            tiles_after_48.push_back(tile);
-        }
-    }
-
-    for (int sample = PILOT_SAMPLES; sample < std::min(16, MAX_SAMPLES); ++sample) {
-        render_sample(sample, tiles_after_4);
-    }
-    for (int sample = 16; sample < std::min(48, MAX_SAMPLES); ++sample) {
-        render_sample(sample, tiles_after_16);
-    }
-    for (int sample = 48; sample < MAX_SAMPLES; ++sample) {
-        render_sample(sample, tiles_after_48);
+    // The current heuristic tops out at 64 spp, even with a larger budget.
+    int target_max = 0;
+    for (const RenderTile &tile : tiles) target_max = std::max(target_max, tile.target_samples);
+    for (int sample = PILOT_SAMPLES; sample < target_max; ++sample) {
+        render_sample(sample, tiles);
     }
 
     auto render_end = std::chrono::steady_clock::now();
 
     auto convert_start = std::chrono::steady_clock::now();
 
-    // TOGGLE THIS TRUE TO SEE CPU EFFORT, FALSE FOR FINAL RENDER
-    const bool RENDER_HEATMAP = false;
+    const bool RENDER_HEATMAP = options.heatmap;
 
     for (int p_idx = 0; p_idx < width * height; ++p_idx) {
+        if (!std::isfinite(accum_r[p_idx]) || !std::isfinite(accum_g[p_idx]) || !std::isfinite(accum_b[p_idx])) {
+            throw std::runtime_error("Non-finite render accumulation at pixel " + std::to_string(p_idx));
+        }
+        if (sample_counts[p_idx] < 1 || sample_counts[p_idx] > MAX_SAMPLES) {
+            throw std::runtime_error("Invalid sample count");
+        }
         if (RENDER_HEATMAP) {
             uint8_t hr, hg, hb;
             // Grab the exact number of samples this specific pixel received
@@ -699,27 +738,19 @@ int main() {
             samples_to_heatmap(current_samples, MAX_SAMPLES, hr, hg, hb);
             framebuffer[p_idx] = {hr, hg, hb};
         } else {
-            // Your original physically-based light conversion
-            float inv_samples = sample_counts[p_idx] > 0
-                                    ? 1.0f / static_cast<float>(sample_counts[p_idx])
-                                    : 0.0f;
-            float avg_r = accum_r[p_idx] * inv_samples;
-            float avg_g = accum_g[p_idx] * inv_samples;
-            float avg_b = accum_b[p_idx] * inv_samples;
-
-            avg_r = std::sqrt(avg_r);
-            avg_g = std::sqrt(avg_g);
-            avg_b = std::sqrt(avg_b);
-
-            int r = std::min(255, std::max(0, static_cast<int>(avg_r * 255.0f)));
-            int g = std::min(255, std::max(0, static_cast<int>(avg_g * 255.0f)));
-            int b = std::min(255, std::max(0, static_cast<int>(avg_b * 255.0f)));
-            framebuffer[p_idx] = {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
+            float inv_samples = 1.0f / static_cast<float>(sample_counts[p_idx]);
+            framebuffer[p_idx] = {
+                display_channel(accum_r[p_idx] * inv_samples),
+                display_channel(accum_g[p_idx] * inv_samples),
+                display_channel(accum_b[p_idx] * inv_samples)};
         }
     }
     auto convert_end = std::chrono::steady_clock::now();
 
-    write_ppm_image("image.ppm", width, height, framebuffer);
+    const auto parent = std::filesystem::path(options.output).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent);
+    write_ppm_image(options.output, width, height, framebuffer);
+    std::cout << "Wrote " << options.output << " (finite accumulation, clamped RGB)\n";
 
     RenderStats stats;
     for (const RenderStats& worker_stat : worker_stats) {
@@ -757,10 +788,23 @@ int main() {
     std::cout << "  surface hits: " << stats.surface_hits << "\n";
     std::cout << "  sky hits: " << stats.sky_hits << "\n";
 
-    // CLEANUP
-    _mm_free(engine.materials);
-    _mm_free(engine.bvh_nodes);
-    _mm_free(engine.triangles);
-
     return 0;
 }
+
+#ifndef SPECTRAL_TEST
+int main(int argc, char **argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--help") {
+        std::cout << "Usage: spectral_tracer [--mesh binary.stl] [--output image.ppm]\n"
+                     "       [--width 1..8192] [--height 1..8192] [--samples 1..65535] [--heatmap]\n"
+                     "Defaults: orc.stl, output/image.ppm, 640x360, 64 spp budget.\n"
+                     "At most 16777216 pixels. Adaptive tiers: up to 4, 16, 64 spp.\n";
+        return 0;
+    }
+    try {
+        return run(parse_options(argc, argv));
+    } catch (const std::exception &error) {
+        std::cerr << "Error: " << error.what() << "\n";
+        return 1;
+    }
+}
+#endif

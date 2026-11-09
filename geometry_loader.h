@@ -376,12 +376,22 @@ inline bool load_binary_stl(const std::string& filepath, EngineState& engine) {
         return false;
     }
 
-    // skip the header, its 80 bytes and useless
+    file.seekg(0, std::ios::end);
+    const auto file_size = file.tellg();
+    if (file_size < 84) {
+        std::cerr << "FAILED: Truncated binary STL header\n";
+        return false;
+    }
     file.seekg(80);
 
     // Read the total triangle count
     uint32_t num_tris = 0;
     file.read(reinterpret_cast<char*>(&num_tris), sizeof(uint32_t));
+    if (!file || num_tris == 0 || num_tris > 10000000 ||
+        static_cast<uint64_t>(file_size) != 84ULL + 50ULL * num_tris) {
+        std::cerr << "FAILED: Expected nonempty binary STL with matching count/size (max 10000000 triangles)\n";
+        return false;
+    }
     std::cout << "Loading STL with " << num_tris << " triangles...\n";
 
     // Allocate the Global Arenas
@@ -392,7 +402,7 @@ inline bool load_binary_stl(const std::string& filepath, EngineState& engine) {
     engine.total_bvh_nodes = num_tris * 2;
     engine.bvh_nodes = (BVHNode*)_mm_malloc(sizeof(BVHNode) * engine.total_bvh_nodes, 64);
     
-    // (You'll still need to malloc your materials separately later)
+    if (!engine.triangles || !engine.bvh_nodes) throw std::bad_alloc();
 
     // each tri is 50 bytes in an stl
     // This just organizes those 50 bytes into our padded format.
@@ -407,6 +417,18 @@ inline bool load_binary_stl(const std::string& filepath, EngineState& engine) {
         file.read(reinterpret_cast<char*>(v2), 12);
         file.read(reinterpret_cast<char*>(&attribute_byte_count), 2);
 
+        if (!file) {
+            std::cerr << "FAILED: Truncated binary STL record\n";
+            return false;
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(v0[axis]) || !std::isfinite(v1[axis]) || !std::isfinite(v2[axis]) ||
+                std::abs(v0[axis]) > 1e10f || std::abs(v1[axis]) > 1e10f || std::abs(v2[axis]) > 1e10f) {
+                std::cerr << "FAILED: Invalid or excessive STL coordinate\n";
+                return false;
+            }
+        }
+
         // Map to our DOD Triangle struct
         Triangle& tri = engine.triangles[i];
         
@@ -416,8 +438,16 @@ inline bool load_binary_stl(const std::string& filepath, EngineState& engine) {
         tri.e1_x = v1[0] - v0[0]; tri.e1_y = v1[1] - v0[1]; tri.e1_z = v1[2] - v0[2];
         tri.e2_x = v2[0] - v0[0]; tri.e2_y = v2[1] - v0[1]; tri.e2_z = v2[2] - v0[2];
 
-        // Store the pre-calculated normal
-        tri.norm_x = normal[0]; tri.norm_y = normal[1]; tri.norm_z = normal[2];
+        // STL normals can be zero or unnormalized; derive them from the winding.
+        float nx = tri.e1_y * tri.e2_z - tri.e1_z * tri.e2_y;
+        float ny = tri.e1_z * tri.e2_x - tri.e1_x * tri.e2_z;
+        float nz = tri.e1_x * tri.e2_y - tri.e1_y * tri.e2_x;
+        float length = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (!std::isfinite(length) || length <= 1e-12f) {
+            std::cerr << "FAILED: Degenerate or excessive STL triangle\n";
+            return false;
+        }
+        tri.norm_x = nx / length; tri.norm_y = ny / length; tri.norm_z = nz / length;
         tri.material_id = 0; 
     }
 
